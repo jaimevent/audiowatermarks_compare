@@ -6,14 +6,20 @@ import os
 # Without Build Tools, compilation fails. Disable Dynamo before importing torch.
 os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
 
-import sys
+import argparse
 import tempfile
 import torch
 
 torch._dynamo.config.disable = True  # belt-and-suspenders if env above is ignored
 
+import numpy as np
 import soundfile as sf
 from audioseal import AudioSeal
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 
 def convert_flac_to_wav(src_flac: str, dst_wav: str) -> None:
@@ -42,16 +48,126 @@ def load_audio(file_path: str) -> tuple[torch.Tensor, int]:
             os.unlink(tmp_path)
     return _load_from_wav_file(file_path)
 
+
+def _to_mono_numpy(waveform: torch.Tensor) -> np.ndarray:
+    """Match notebook expectations: 1D signal for waveform and specgram."""
+    x = waveform.squeeze().detach().cpu().numpy()
+    if x.ndim == 1:
+        return x
+    if x.ndim == 2:
+        return x[0]
+    raise ValueError(f"Unexpected waveform rank after squeeze: {x.ndim}")
+
+
+def _plot_waveform_and_specgram_on_axes(
+    ax_wave,
+    ax_spec,
+    waveform_1d: np.ndarray,
+    sample_rate: int,
+    title: str,
+) -> None:
+    """Same layout as facebookresearch/audioseal examples/notebook.py."""
+    num_frames = waveform_1d.shape[-1]
+    time_axis = np.arange(0, num_frames, dtype=np.float64) / float(sample_rate)
+    ax_wave.plot(time_axis, waveform_1d, linewidth=1)
+    ax_wave.set_title(f"{title} — waveform")
+    ax_wave.grid(True)
+    ax_spec.specgram(waveform_1d, Fs=sample_rate)
+    ax_spec.set_title(f"{title} — spectrogram")
+
+
+def save_original_vs_watermarked_plot(
+    wav_original: torch.Tensor,
+    wav_watermarked: torch.Tensor,
+    sample_rate: int,
+    suptitle: str,
+    out_path: str,
+    *,
+    dpi: int = 150,
+) -> None:
+    """Two rows: original (waveform + specgram), watermarked (waveform + specgram)."""
+    plt.rcParams["figure.figsize"] = (20, 6)
+    y0 = _to_mono_numpy(wav_original)
+    y1 = _to_mono_numpy(wav_watermarked)
+    figure, axes = plt.subplots(2, 2)
+    _plot_waveform_and_specgram_on_axes(
+        axes[0, 0], axes[0, 1], y0, sample_rate, title="Original audio"
+    )
+    _plot_waveform_and_specgram_on_axes(
+        axes[1, 0], axes[1, 1], y1, sample_rate, title="Watermarked audio"
+    )
+    figure.suptitle(suptitle)
+    figure.tight_layout()
+    figure.savefig(out_path, dpi=dpi)
+    plt.close(figure)
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run AudioSeal on each .wav / .flac in a folder: embed watermark, detect, "
+            "and optionally save original vs watermarked comparison plots."
+        )
+    )
+    parser.add_argument(
+        "--input",
+        "-i",
+        required=True,
+        metavar="DIR",
+        help="Directory containing .wav and/or .flac files (non-recursive).",
+    )
+    parser.add_argument(
+        "--output-plot",
+        "-o",
+        default=None,
+        metavar="DIR",
+        help="Directory for PNG plots (default: <input>/audioseal_plots).",
+    )
+    parser.add_argument(
+        "--no-plots",
+        action="store_true",
+        help="Skip writing comparison plots.",
+    )
+    parser.add_argument(
+        "--plot-dpi",
+        type=int,
+        default=150,
+        metavar="N",
+        help="Resolution of saved PNG figures (default: 150).",
+    )
+    parser.add_argument(
+        "--generator",
+        default="audioseal_wm_16bits",
+        metavar="NAME",
+        help="AudioSeal generator card name (default: audioseal_wm_16bits).",
+    )
+    parser.add_argument(
+        "--detector",
+        default="audioseal_detector_16bits",
+        metavar="NAME",
+        help="AudioSeal detector card name (default: audioseal_detector_16bits).",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("Usage: python main.py <audio_folder>")
-        sys.exit(1)
-    
-    # Load the model
-    model = AudioSeal.load_generator("audioseal_wm_16bits")
+    args = _parse_args()
+    audio_folder = os.path.abspath(args.input)
+    if not os.path.isdir(audio_folder):
+        raise SystemExit(f"Not a directory: {audio_folder}")
+
+    plot_dir = None
+    if not args.no_plots:
+        plot_dir = os.path.abspath(
+            args.output_plot or os.path.join(audio_folder, "audioseal_plots")
+        )
+        os.makedirs(plot_dir, exist_ok=True)
+
+    model = AudioSeal.load_generator(args.generator)
     model.eval()
-    
-    audio_folder = sys.argv[1]
+    detector = AudioSeal.load_detector(args.detector)
+    detector.eval()
+
     audio_files = [
         f
         for f in os.listdir(audio_folder)
@@ -60,15 +176,25 @@ if __name__ == "__main__":
     for audio_file in audio_files:
         audio_path = os.path.join(audio_folder, audio_file)
         wav, sample_rate = load_audio(audio_path)
-        # Model expects (batch, channels, samples); file loaders return (channels, samples).
         wav = wav.unsqueeze(0)
         watermark = model.get_watermark(wav)
         watermarked_audio = wav + watermark
 
-        detector = AudioSeal.load_detector("audioseal_detector_16bits")
         result, message = detector.detect_watermark(watermarked_audio)
-        
-        print(f"Audio: {audio_file}, Result: {result[:, 1 , :]}, Message: {message}")
+        print(f"Audio: {audio_file}, Result: {result}, Message: {message}")
+
+        if plot_dir is not None:
+            stem, _ = os.path.splitext(audio_file)
+            plot_path = os.path.join(plot_dir, f"{stem}_original_vs_watermarked.png")
+            save_original_vs_watermarked_plot(
+                wav,
+                watermarked_audio,
+                sample_rate,
+                suptitle=f"{audio_file} — original vs watermarked",
+                out_path=plot_path,
+                dpi=args.plot_dpi,
+            )
+            print(f"  Saved plot: {plot_path}")
 
 # Other way is to load directly from the checkpoint
 # model =  Watermarker.from_pretrained(checkpoint_path, device = wav.device)
