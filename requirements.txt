@@ -1,0 +1,19 @@
+# main.py: torch, torchaudio, audioseal.
+# audioseal also installs numpy, omegaconf, and (on Python >= 3.10) einops.
+#
+# torchcodec must match torch (see https://github.com/pytorch/torchcodec#installing-torchcodec):
+#   torchcodec 0.11.x  ->  torch 2.11.x  (Python >=3.10, <=3.14)
+#
+# FFmpeg is required by torchcodec but is NOT installed via pip: install a system/conda
+# FFmpeg with shared libraries (on Windows use "shared" builds). Supported majors: 4–8.
+# Upstream benchmarks use FFmpeg 6.1.2; 6.1.x or 7.x is a good default, e.g.:
+#   conda install -c conda-forge "ffmpeg>=6.1,<8"
+# CPU torchcodec wheels often need:
+#   pip install torchcodec --index-url=https://download.pytorch.org/whl/cpu
+# (match --index-url to the same CUDA/CPU channel you used for torch/torchaudio.)
+torch>=2.11,<2.12
+torchaudio>=2.11,<2.12
+torchcodec>=0.11,<0.12
+audioseal>=0.1.0
+# Audio I/O in main.py via libsndfile: WAV and FLAC decode; avoids torchcodec for load.
+soundfile>=0.12
