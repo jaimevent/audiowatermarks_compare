@@ -117,6 +117,32 @@ def save_watermarked_wav(
     sf.write(out_path, data, sample_rate, format="WAV", subtype="FLOAT")
 
 
+def watermarking_snr_db(
+    wav_original: torch.Tensor,
+    wav_watermarked: torch.Tensor,
+    *,
+    eps: float = 1e-20,
+) -> float:
+    """SNR (dB) of the original versus the additive watermark.
+
+    Uses the usual embedding SNR: signal = original, noise = watermarked − original.
+    Averages mean square across channels and time (batch must match; only index 0 is used).
+    """
+    if wav_original.shape != wav_watermarked.shape:
+        raise ValueError(
+            f"Shape mismatch: original {tuple(wav_original.shape)} vs watermarked {tuple(wav_watermarked.shape)}"
+        )
+    if wav_original.dim() != 3:
+        raise ValueError(
+            f"Expected tensors of rank 3 (batch, channels, samples); got {wav_original.dim()}"
+        )
+    original = wav_original[0]
+    noise = wav_watermarked[0] - original
+    power_signal = (original * original).mean().clamp_min(eps)
+    power_noise = (noise * noise).mean().clamp_min(eps)
+    return (10.0 * torch.log10(power_signal / power_noise)).item()
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -194,6 +220,10 @@ if __name__ == "__main__":
     detector = AudioSeal.load_detector(args.detector)
     detector.eval()
 
+    # Move model to GPU if available
+    if torch.cuda.is_available():
+        model = model.cuda()
+
     audio_files = [
         f
         for f in os.listdir(audio_folder)
@@ -202,9 +232,16 @@ if __name__ == "__main__":
     for audio_file in audio_files:
         audio_path = os.path.join(audio_folder, audio_file)
         wav, sample_rate = load_audio(audio_path)
+        # Move model to GPU if available
+        if torch.cuda.is_available():
+            wav = wav.cuda()
+
         wav = wav.unsqueeze(0)
         watermark = model.get_watermark(wav)
         watermarked_audio = wav + watermark
+
+        snr_db = watermarking_snr_db(wav, watermarked_audio)
+        print(f"  Watermark SNR (original vs residual): {snr_db:.2f} dB")
 
         stem, _ = os.path.splitext(audio_file)
         wav_out_path = os.path.join(watermarked_wav_dir, f"{stem}_watermarked.wav")
