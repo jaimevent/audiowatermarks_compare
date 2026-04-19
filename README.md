@@ -65,7 +65,7 @@ If a **CUDA** device is available, the generator and tensors used in the loop ar
 
 ### Audio loading
 
-- **WAV** and **FLAC** are supported. Loading uses **PySoundFile** (`soundfile`) so file I/O does not depend on **torchaudio’s TorchCodec path**, which on Windows often needs a full **FFmpeg shared** install on `PATH`.
+- **WAV** and **FLAC** are supported. Loading uses **PySoundFile** (`soundfile`) backed by **libsndfile**; no separate media server is required for these formats in `main.py`.
 - FLAC files are decoded and passed through a **temporary WAV** on disk before the same read path as WAV.
 
 ### Tensor shape

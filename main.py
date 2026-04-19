@@ -31,7 +31,7 @@ def convert_flac_to_wav(src_flac: str, dst_wav: str) -> None:
 
 
 def _load_from_wav_file(wav_path: str) -> tuple[torch.Tensor, int]:
-    # soundfile avoids torchaudio 2.10+ routing through torchcodec (FFmpeg DLLs on Windows).
+    # soundfile avoids torchaudio 2.10+ routing through torchcodec for simple file decode.
     data, sample_rate = sf.read(wav_path, dtype="float32", always_2d=True)
     wav = torch.from_numpy(data.T.copy())
     return wav, sample_rate
@@ -299,7 +299,7 @@ def main() -> None:
         raise SystemExit(f"Not a directory: {audio_folder}")
 
     plot_dir = None
-    if not args.no_plots:
+    if args.command == "watermark" and not args.no_plots:
         plot_dir = os.path.abspath(
             args.output_plot or os.path.join(audio_folder, "audioseal_plots")
         )
@@ -336,9 +336,12 @@ def main() -> None:
         if torch.cuda.is_available():
             wav = wav.cuda()
 
+        # load_audio returns wav shaped (channels, samples) (from soundfile: channels first). After wav.unsqueeze(0) it returns 
+        # (1, channels, samples): batch size 1, which matches what AudioSeal expects (batch × channels × samples).
+        wav = wav.unsqueeze(0)
+
         # Add watermark
-        if args.command == "watermark":
-            wav = wav.unsqueeze(0)
+        if args.command == "watermark":            
             watermark = model.get_watermark(wav)
             watermarked_audio = wav + watermark
 
@@ -369,17 +372,14 @@ def main() -> None:
 
         # Detect watermark
         if args.command == "detect":
-            if torch.cuda.is_available():
-                watermarked_audio = watermarked_audio.cuda()
-
             # High-level: fraction of frames with P(watermark) > detection_threshold (see AudioSeal AudioSealDetector.detect_watermark).
             det_thresh = 0.5
             detect_frame_fraction, binary_message = detector.detect_watermark(
-                watermarked_audio,
+                wav,
                 message_threshold=0.5,
                 detection_threshold=det_thresh,
             )
-            frame_logits, message_probs = detector(watermarked_audio)
+            frame_logits, message_probs = detector(wav)
             print_watermark_detection_summary(
                 detect_frame_fraction=detect_frame_fraction,
                 binary_message=binary_message,
