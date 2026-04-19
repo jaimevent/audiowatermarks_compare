@@ -144,6 +144,53 @@ def watermarking_snr_db(
     return (10.0 * torch.log10(power_signal / power_noise)).item()
 
 
+def print_watermark_detection_summary(
+    *,
+    detect_frame_fraction: torch.Tensor,
+    binary_message: torch.Tensor,
+    frame_logits: torch.Tensor,
+    message_probs: torch.Tensor,
+    detection_threshold: float,
+    file_fraction_threshold: float,
+    show_raw: bool,
+) -> None:
+    """Explain AudioSeal outputs in plain language.
+
+    ``detect_watermark`` (upstream) sets ``detect_frame_fraction`` to the fraction of
+    time frames where P(watermark) > ``detection_threshold``. The file-level verdict
+    below treats the clip as detected if that fraction is >= ``file_fraction_threshold``.
+
+    ``frame_logits`` is ``batch x 2 x frames`` with softmax over the first two channels
+    (not watermarked vs watermarked). ``message_probs`` is ``batch x nbits`` in [0, 1].
+    """
+    frac = float(detect_frame_fraction.reshape(-1)[0].item())
+    file_detected = frac >= file_fraction_threshold
+    verdict = "watermark likely present" if file_detected else "watermark likely NOT present"
+    print(
+        f"  Detector file verdict: {verdict} "
+        f"({frac:.1%} of frames with P(wm) > {detection_threshold}; "
+        f"file threshold {file_fraction_threshold:.0%})"
+    )
+
+    wm_probs = frame_logits[:, 1, :].detach().float()
+    mean_p = float(wm_probs.mean().item())
+    frac_frames = float((wm_probs > detection_threshold).float().mean().item())
+    print(
+        f"  Detector frame stats: mean P(wm)={mean_p:.3f}; "
+        f"{frac_frames:.1%} of frames > {detection_threshold}"
+    )
+
+    bits = binary_message[0].detach().cpu().numpy().tolist()
+    if bits:
+        bit_str = "".join(str(int(b)) for b in bits)
+        print(f"  Decoded message (binary, threshold {detection_threshold}): {bit_str}")
+
+    if show_raw:
+        print(f"    [debug] detect_frame_fraction tensor: {detect_frame_fraction}")
+        print(f"    [debug] frame P(wm) sample (first 12): {wm_probs[0, :12].cpu().tolist()}")
+        print(f"    [debug] message bit probabilities: {message_probs[0].detach().cpu().numpy()}")
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -226,9 +273,10 @@ def main() -> None:
     detector = AudioSeal.load_detector(args.detector)
     detector.eval()
 
-    # Move model to GPU if available
+    # Move models to GPU if available (tensors must match detector device).
     if torch.cuda.is_available():
         model = model.cuda()
+        detector = detector.cuda()
 
     audio_files = [
         f
@@ -236,6 +284,7 @@ def main() -> None:
         if f.lower().endswith(".wav") or f.lower().endswith(".flac")
     ]
     for audio_file in audio_files:
+        print(f"---- Processing audio file: {audio_file} ----")
         audio_path = os.path.join(audio_folder, audio_file)
         wav, sample_rate = load_audio(audio_path)
         # Move model to GPU if available
@@ -257,20 +306,23 @@ def main() -> None:
         if torch.cuda.is_available():
             watermarked_audio = watermarked_audio.cuda()
 
-        # To detect the messages in the high-level.
-        # message_threshold indicates the threshold in which the detector will convert the stochastic messages (with probability 
-        # between 0 and 1) into the n-bit binary format. In most of the case, the generator generates an unbiased message from 
-        # the secret, so 0.5 is a reasonable choice (so the value > 0.5 means 1 and value < 0.5 means 0).
-        result, message = detector.detect_watermark(watermarked_audio, message_threshold=0.5)
-        if args.debug:
-            print(f"Detect messages in the high-level: Audio: {audio_file}, Result: {result}, Message: {message}")
-
-        # To detect the messages in the low-level.
-        result, message = detector(watermarked_audio)
-        if args.debug:
-            # result is a tensor of size batch x 2 x frames, indicating the probability (positive and negative) of watermarking for each frame
-            # A watermarked audio should have result[:, 1, :] > 0.5
-            print(f"Detect messages in the low-level: Audio: {audio_file}, Result: {result[:, 1 , :]}, Message: {message}")  
+        # High-level: fraction of frames with P(watermark) > detection_threshold (see AudioSeal AudioSealDetector.detect_watermark).
+        det_thresh = 0.5
+        detect_frame_fraction, binary_message = detector.detect_watermark(
+            watermarked_audio,
+            message_threshold=0.5,
+            detection_threshold=det_thresh,
+        )
+        frame_logits, message_probs = detector(watermarked_audio)
+        print_watermark_detection_summary(
+            detect_frame_fraction=detect_frame_fraction,
+            binary_message=binary_message,
+            frame_logits=frame_logits,
+            message_probs=message_probs,
+            detection_threshold=det_thresh,
+            file_fraction_threshold=0.5,
+            show_raw=bool(args.debug),
+        )
 
         # Generate plots
         if plot_dir is not None:

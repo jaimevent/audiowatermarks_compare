@@ -1,4 +1,4 @@
-# audiowatermarks_compare
+# Audiowatermarks Compare
 
 Small Python utility to run **Meta [AudioSeal](https://github.com/facebookresearch/audioseal)** on a folder of audio files: embed a watermark with the generator, measure how loud the residual is versus the original, save the watermarked waveform, optionally export comparison plots, and score the result with the detector. It is a practical starting point for comparing or benchmarking audio watermarking setups.
 
