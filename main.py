@@ -9,6 +9,7 @@ os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
 import argparse
 import sys
 import tempfile
+import warnings
 import torch
 
 torch._dynamo.config.disable = True  # belt-and-suspenders if env above is ignored
@@ -72,7 +73,10 @@ def _plot_waveform_and_specgram_on_axes(
     ax_wave.plot(time_axis, waveform_1d, linewidth=1)
     ax_wave.set_title(f"{title} — waveform")
     ax_wave.grid(True)
-    ax_spec.specgram(waveform_1d, Fs=sample_rate)
+    # Matplotlib specgram uses log10(power); silent bins → divide-by-zero warnings.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        ax_spec.specgram(waveform_1d, Fs=sample_rate)
     ax_spec.set_title(f"{title} — spectrogram")
 
 
@@ -194,46 +198,8 @@ def print_watermark_detection_summary(
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Run AudioSeal on each .wav / .flac in a folder: embed watermark, detect, "
-            "and optionally save original vs watermarked comparison plots."
+            "AudioSeal utilities. Subcommands: watermark (default pipeline), detect, attack, plot."
         )
-    )
-    parser.add_argument(
-        "--input",
-        "-i",
-        required=True,
-        metavar="DIR",
-        help="Directory containing .wav and/or .flac files (non-recursive).",
-    )
-    parser.add_argument(
-        "--output-plot",
-        "-o",
-        default=None,
-        metavar="DIR",
-        help="Directory for PNG plots (default: <input>/audioseal_plots).",
-    )
-    parser.add_argument(
-        "--debug",
-        default=True,
-        help="Show debug information.",
-    )
-    parser.add_argument(
-        "--no-plots",
-        action="store_true",
-        help="Skip writing comparison plots.",
-    )
-    parser.add_argument(
-        "--plot-dpi",
-        type=int,
-        default=150,
-        metavar="N",
-        help="Resolution of saved PNG figures (default: 150).",
-    )
-    parser.add_argument(
-        "--output-watermarked",
-        default=None,
-        metavar="DIR",
-        help="Directory for watermarked WAV files (default: <input>/watermarked_wav).",
     )
     parser.add_argument(
         "--generator",
@@ -247,11 +213,87 @@ def _parse_args() -> argparse.Namespace:
         metavar="NAME",
         help="AudioSeal detector card name (default: audioseal_detector_16bits).",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--debug",
+        default=True,
+        help="Show debug information.",
+    )
 
+    subparsers = parser.add_subparsers(
+        dest="command",
+        required=True,
+        metavar="COMMAND",
+        help="Action to run.",
+    )
+
+    input_help = "Directory containing .wav and/or .flac files (non-recursive)."
+
+    p_watermark = subparsers.add_parser(
+        "watermark",
+        help="Embed a watermark into audio files.",
+    )
+    p_watermark.add_argument(
+        "--input",
+        "-i",
+        required=True,
+        metavar="DIR",
+        help=input_help,
+    )
+    p_watermark.add_argument(
+        "--output-plot",
+        "-o",
+        default=None,
+        metavar="DIR",
+        help="Directory for PNG plots (default: <input>/audioseal_plots).",
+    )
+    p_watermark.add_argument(
+        "--no-plots",
+        action="store_true",
+        help="Skip writing comparison plots.",
+    )
+    p_watermark.add_argument(
+        "--plot-dpi",
+        type=int,
+        default=150,
+        metavar="N",
+        help="Resolution of saved PNG figures (default: 150).",
+    )
+    p_watermark.add_argument(
+        "--output-watermarked",
+        default=None,
+        metavar="DIR",
+        help="Directory for watermarked WAV files (default: <input>/watermarked_wav).",
+    )
+
+    p_detect = subparsers.add_parser(
+        "detect",
+        help="Detect a watermark in audio files.",
+    )
+    p_detect.add_argument(
+        "--input",
+        "-i",
+        required=True,
+        metavar="DIR",
+        help=input_help,
+    )
+
+    p_attack = subparsers.add_parser(
+        "attack",
+        help="Apply attacks and evaluate detection.",
+    )
+    p_attack.add_argument(
+        "--input",
+        "-i",
+        required=True,
+        metavar="DIR",
+        help=input_help,
+    )
+
+    return parser.parse_args()
 
 def main() -> None:
     args = _parse_args()
+
     audio_folder = os.path.abspath(args.input)
     if not os.path.isdir(audio_folder):
         raise SystemExit(f"Not a directory: {audio_folder}")
@@ -263,10 +305,11 @@ def main() -> None:
         )
         os.makedirs(plot_dir, exist_ok=True)
 
-    watermarked_wav_dir = os.path.abspath(
-        args.output_watermarked or os.path.join(audio_folder, "watermarked_wav")
-    )
-    os.makedirs(watermarked_wav_dir, exist_ok=True)
+    if args.command == "watermark":
+        watermarked_wav_dir = os.path.abspath(
+            args.output_watermarked or os.path.join(audio_folder, "watermarked_wav")
+        )
+        os.makedirs(watermarked_wav_dir, exist_ok=True)
 
     model = AudioSeal.load_generator(args.generator)
     model.eval()
@@ -277,6 +320,8 @@ def main() -> None:
     if torch.cuda.is_available():
         model = model.cuda()
         detector = detector.cuda()
+
+    print(f"You've selected the following command: {args.command}")
 
     audio_files = [
         f
@@ -291,52 +336,64 @@ def main() -> None:
         if torch.cuda.is_available():
             wav = wav.cuda()
 
-        wav = wav.unsqueeze(0)
-        watermark = model.get_watermark(wav)
-        watermarked_audio = wav + watermark
+        # Add watermark
+        if args.command == "watermark":
+            wav = wav.unsqueeze(0)
+            watermark = model.get_watermark(wav)
+            watermarked_audio = wav + watermark
 
-        snr_db = watermarking_snr_db(wav, watermarked_audio)
-        print(f"  Watermark SNR (original vs residual): {snr_db:.2f} dB")
+            if torch.cuda.is_available():
+                watermarked_audio = watermarked_audio.cuda()
+            # Measure SNR
+            snr_db = watermarking_snr_db(wav, watermarked_audio)
+            print(f"  Watermark SNR (original vs residual): {snr_db:.2f} dB")
 
-        stem, _ = os.path.splitext(audio_file)
-        wav_out_path = os.path.join(watermarked_wav_dir, f"{stem}_watermarked.wav")
-        save_watermarked_wav(watermarked_audio, sample_rate, wav_out_path)
-        print(f"  Saved watermarked WAV: {stem}_watermarked.wav")
+            # Save watermarked audio
+            stem, _ = os.path.splitext(audio_file)
+            wav_out_path = os.path.join(watermarked_wav_dir, f"{stem}_watermarked.wav")
+            save_watermarked_wav(watermarked_audio, sample_rate, wav_out_path)
+            print(f"  Saved watermarked WAV: {stem}_watermarked.wav")
 
-        if torch.cuda.is_available():
-            watermarked_audio = watermarked_audio.cuda()
+            # Generate plots
+            if not args.no_plots and plot_dir is not None:
+                plot_path = os.path.join(plot_dir, f"{stem}_original_vs_watermarked.png")
+                save_original_vs_watermarked_plot(
+                    wav,
+                    watermarked_audio,
+                    sample_rate,
+                    suptitle=f"{audio_file} — original vs watermarked",
+                    out_path=plot_path,
+                    dpi=args.plot_dpi,
+                )
+                print(f"  Saved plot: {plot_path}")
 
-        # High-level: fraction of frames with P(watermark) > detection_threshold (see AudioSeal AudioSealDetector.detect_watermark).
-        det_thresh = 0.5
-        detect_frame_fraction, binary_message = detector.detect_watermark(
-            watermarked_audio,
-            message_threshold=0.5,
-            detection_threshold=det_thresh,
-        )
-        frame_logits, message_probs = detector(watermarked_audio)
-        print_watermark_detection_summary(
-            detect_frame_fraction=detect_frame_fraction,
-            binary_message=binary_message,
-            frame_logits=frame_logits,
-            message_probs=message_probs,
-            detection_threshold=det_thresh,
-            file_fraction_threshold=0.5,
-            show_raw=bool(args.debug),
-        )
+        # Detect watermark
+        if args.command == "detect":
+            if torch.cuda.is_available():
+                watermarked_audio = watermarked_audio.cuda()
 
-        # Generate plots
-        if plot_dir is not None:
-            plot_path = os.path.join(plot_dir, f"{stem}_original_vs_watermarked.png")
-            save_original_vs_watermarked_plot(
-                wav,
+            # High-level: fraction of frames with P(watermark) > detection_threshold (see AudioSeal AudioSealDetector.detect_watermark).
+            det_thresh = 0.5
+            detect_frame_fraction, binary_message = detector.detect_watermark(
                 watermarked_audio,
-                sample_rate,
-                suptitle=f"{audio_file} — original vs watermarked",
-                out_path=plot_path,
-                dpi=args.plot_dpi,
+                message_threshold=0.5,
+                detection_threshold=det_thresh,
             )
-            print(f"  Saved plot: {plot_path}")
+            frame_logits, message_probs = detector(watermarked_audio)
+            print_watermark_detection_summary(
+                detect_frame_fraction=detect_frame_fraction,
+                binary_message=binary_message,
+                frame_logits=frame_logits,
+                message_probs=message_probs,
+                detection_threshold=det_thresh,
+                file_fraction_threshold=0.5,
+                show_raw=bool(args.debug),
+            )
 
+        # Attack
+        if args.command == "attack":
+            pass
+            return
 
 if __name__ == "__main__":
     try:
@@ -347,39 +404,3 @@ if __name__ == "__main__":
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         raise SystemExit(130)
-
-# Other way is to load directly from the checkpoint
-# model =  Watermarker.from_pretrained(checkpoint_path, device = wav.device)
-
-# a torch tensor of shape (batch, channels, samples) and a sample rate
-# It is important to process the audio to the same sample rate as the model
-# expects. The default AudioSeal should work well with 16kHz and 24kHz, and 
-# in the case of 48 khZ, it should work well for most speech audios
-# wav = [load audio wav into a tensor of BatchxChannelxTime]
-
-# watermark = model.get_watermark(wav)
-
-# Optional: you can add a 16-bit message to embed in the watermark
-# msg = torch.randint(0, 2, (wav.shape(0), model.msg_processor.nbits), device=wav.device)
-# watermark = model.get_watermark(wav, message = msg)
-
-# watermarked_audio = wav + watermark
-
-# detector = AudioSeal.load_detector("audioseal_detector_16bits")
-
-# To detect the messages in the high-level.
-# result, message = detector.detect_watermark(watermarked_audio)
-
-# print(result) # result is a float number indicating the probability of the audio being watermarked,
-# print(message)  # message is a binary vector of 16 bits
-
-# To detect the messages in the low-level.
-# result, message = detector(watermarked_audio)
-
-# result is a tensor of size batch x 2 x frames, indicating the probability (positive and negative) of watermarking for each frame
-# A watermarked audio should have result[:, 1, :] > 0.5
-# print(result[:, 1 , :])  
-
-# Message is a tensor of size batch x 16, indicating of the probability of each bit to be 1.
-# message will be a random tensor if the detector detects no watermarking from the audio
-# print(message)
