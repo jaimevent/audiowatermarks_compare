@@ -166,6 +166,11 @@ def _parse_args() -> argparse.Namespace:
         help="Directory for PNG plots (default: <input>/audioseal_plots).",
     )
     parser.add_argument(
+        "--debug",
+        default=True,
+        help="Show debug information.",
+    )
+    parser.add_argument(
         "--no-plots",
         action="store_true",
         help="Skip writing comparison plots.",
@@ -247,18 +252,25 @@ def main() -> None:
         stem, _ = os.path.splitext(audio_file)
         wav_out_path = os.path.join(watermarked_wav_dir, f"{stem}_watermarked.wav")
         save_watermarked_wav(watermarked_audio, sample_rate, wav_out_path)
-        print(f"  Saved watermarked WAV: {wav_out_path}")
+        print(f"  Saved watermarked WAV: {stem}_watermarked.wav")
+
+        if torch.cuda.is_available():
+            watermarked_audio = watermarked_audio.cuda()
 
         # To detect the messages in the high-level.
-        result, message = detector.detect_watermark(watermarked_audio)
-        print(f"Detect messages in the high-level: Audio: {audio_file}, Result: {result}, Message: {message}")
+        # message_threshold indicates the threshold in which the detector will convert the stochastic messages (with probability 
+        # between 0 and 1) into the n-bit binary format. In most of the case, the generator generates an unbiased message from 
+        # the secret, so 0.5 is a reasonable choice (so the value > 0.5 means 1 and value < 0.5 means 0).
+        result, message = detector.detect_watermark(watermarked_audio, message_threshold=0.5)
+        if args.debug:
+            print(f"Detect messages in the high-level: Audio: {audio_file}, Result: {result}, Message: {message}")
 
         # To detect the messages in the low-level.
         result, message = detector(watermarked_audio)
-
-        # result is a tensor of size batch x 2 x frames, indicating the probability (positive and negative) of watermarking for each frame
-        # A watermarked audio should have result[:, 1, :] > 0.5
-        print(f"Detect messages in the low-level: Audio: {audio_file}, Result: {result[:, 1 , :]}, Message: {message}")  
+        if args.debug:
+            # result is a tensor of size batch x 2 x frames, indicating the probability (positive and negative) of watermarking for each frame
+            # A watermarked audio should have result[:, 1, :] > 0.5
+            print(f"Detect messages in the low-level: Audio: {audio_file}, Result: {result[:, 1 , :]}, Message: {message}")  
 
         # Generate plots
         if plot_dir is not None:

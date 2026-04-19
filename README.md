@@ -1,11 +1,11 @@
 # audiowatermarks_compare
 
-Small Python utility to run **Meta [AudioSeal](https://github.com/facebookresearch/audioseal)** on a folder of audio files: embed a watermark with the generator, then score it with the detector. Intended as a starting point for comparing or benchmarking audio watermarking setups.
+Small Python utility to run **Meta [AudioSeal](https://github.com/facebookresearch/audioseal)** on a folder of audio files: embed a watermark with the generator, measure how loud the residual is versus the original, save the watermarked waveform, optionally export comparison plots, and score the result with the detector. It is a practical starting point for comparing or benchmarking audio watermarking setups.
 
 ## Requirements
 
 - **Python** 3.10 or newer (aligned with PyTorch 2.11 and AudioSeal).
-- **PyTorch**, **torchaudio**, **torchcodec**, **audioseal**, and **soundfile** (see `requirements.txt`).
+- **PyTorch**, **torchaudio**, **torchcodec**, **audioseal**, **soundfile**, and **matplotlib** (see `requirements.txt`).
 
 Install PyTorch from the [official install page](https://pytorch.org/get-started/locally/) if you need a specific CUDA build; then install the rest:
 
@@ -23,19 +23,43 @@ pip install torchcodec --index-url=https://download.pytorch.org/whl/cpu
 
 ## Usage
 
-Point the script at a directory that contains **`.wav`** and/or **`.flac`** files (non-recursive: only the top level of that folder is scanned):
+Point the script at a directory that contains **`.wav`** and/or **`.flac`** files. Only the **top level** of that folder is scanned (no subfolders).
 
 ```bash
-python main.py path\to\audio_folder
+python main.py -i path\to\audio_folder
 ```
 
-Example:
+Short form:
 
 ```bash
-python main.py .\dataset\lld\
+python main.py --input .\dataset\lld\
 ```
 
-For each file, the script loads audio, adds a batch dimension, runs `audioseal_wm_16bits`, adds the watermark to the waveform, runs `audioseal_detector_16bits`, and prints a line with the file name plus detector outputs.
+### Command-line options
+
+| Option | Description |
+|--------|-------------|
+| `-i`, `--input` | **Required.** Folder containing `.wav` / `.flac`. |
+| `-o`, `--output-plot` | Directory for PNG plots (default: `<input>/audioseal_plots`). |
+| `--no-plots` | Skip waveform and spectrogram comparison figures. |
+| `--plot-dpi` | PNG resolution (default: `150`). |
+| `--output-watermarked` | Directory for watermarked WAV files (default: `<input>/watermarked_wav`). |
+| `--generator` | AudioSeal generator card (default: `audioseal_wm_16bits`). |
+| `--detector` | AudioSeal detector card (default: `audioseal_detector_16bits`). |
+| `--debug` | Verbose detector logging in the console (default: `True`). |
+
+Stopping with **Ctrl+C** exits cleanly: a short message on stderr, matplotlib figures closed, CUDA cache cleared when applicable, and exit code **130** (no traceback).
+
+## What the script does per file
+
+1. **Load** the clip (WAV directly; FLAC via a temporary WAV using the same pipeline).
+2. **Embed** the watermark and form `watermarked = original + watermark`.
+3. **Print embedding SNR (dB)** — signal power of the original versus mean-square power of the residual `watermarked − original` (higher dB means a quieter watermark relative to the host audio).
+4. **Save** `<stem>_watermarked.wav` under the watermarked output directory (float32 WAV).
+5. **Run** the detector on the watermarked tensor (high- and low-level API when debug logging is enabled).
+6. **Optionally save** a four-panel PNG (original vs watermarked waveform and spectrogram), matching the layout used in the upstream AudioSeal notebook examples.
+
+If a **CUDA** device is available, the generator and tensors used in the loop are moved to the GPU for inference.
 
 ## Behaviour notes
 
