@@ -7,6 +7,7 @@ import os
 os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
 
 import argparse
+import sys
 import tempfile
 import torch
 
@@ -197,7 +198,7 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-if __name__ == "__main__":
+def main() -> None:
     args = _parse_args()
     audio_folder = os.path.abspath(args.input)
     if not os.path.isdir(audio_folder):
@@ -271,6 +272,17 @@ if __name__ == "__main__":
                 dpi=args.plot_dpi,
             )
             print(f"  Saved plot: {plot_path}")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nInterrupted; stopping script.", file=sys.stderr, flush=True)
+        plt.close("all")
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        raise SystemExit(130)
 
 # Other way is to load directly from the checkpoint
 # model =  Watermarker.from_pretrained(checkpoint_path, device = wav.device)
