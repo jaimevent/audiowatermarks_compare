@@ -48,7 +48,6 @@ def load_audio(file_path: str) -> tuple[torch.Tensor, int]:
             os.unlink(tmp_path)
     return _load_from_wav_file(file_path)
 
-
 def _to_mono_numpy(waveform: torch.Tensor) -> np.ndarray:
     """Match notebook expectations: 1D signal for waveform and specgram."""
     x = waveform.squeeze().detach().cpu().numpy()
@@ -102,6 +101,22 @@ def save_original_vs_watermarked_plot(
     plt.close(figure)
 
 
+def save_watermarked_wav(
+    watermarked_audio: torch.Tensor,
+    sample_rate: int,
+    out_path: str,
+) -> None:
+    """Write watermarked audio as WAV (float32). Expects shape (batch, channels, samples)."""
+    if watermarked_audio.dim() != 3:
+        raise ValueError(
+            f"Expected watermarked tensor rank 3 (batch, channels, samples); got {watermarked_audio.dim()}"
+        )
+    # (channels, samples) -> (samples, channels) for soundfile
+    data = watermarked_audio[0].detach().cpu().numpy().T.astype(np.float32, copy=False)
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+    sf.write(out_path, data, sample_rate, format="WAV", subtype="FLOAT")
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -136,6 +151,12 @@ def _parse_args() -> argparse.Namespace:
         help="Resolution of saved PNG figures (default: 150).",
     )
     parser.add_argument(
+        "--output-watermarked",
+        default=None,
+        metavar="DIR",
+        help="Directory for watermarked WAV files (default: <input>/watermarked_wav).",
+    )
+    parser.add_argument(
         "--generator",
         default="audioseal_wm_16bits",
         metavar="NAME",
@@ -163,6 +184,11 @@ if __name__ == "__main__":
         )
         os.makedirs(plot_dir, exist_ok=True)
 
+    watermarked_wav_dir = os.path.abspath(
+        args.output_watermarked or os.path.join(audio_folder, "watermarked_wav")
+    )
+    os.makedirs(watermarked_wav_dir, exist_ok=True)
+
     model = AudioSeal.load_generator(args.generator)
     model.eval()
     detector = AudioSeal.load_detector(args.detector)
@@ -180,11 +206,24 @@ if __name__ == "__main__":
         watermark = model.get_watermark(wav)
         watermarked_audio = wav + watermark
 
-        result, message = detector.detect_watermark(watermarked_audio)
-        print(f"Audio: {audio_file}, Result: {result}, Message: {message}")
+        stem, _ = os.path.splitext(audio_file)
+        wav_out_path = os.path.join(watermarked_wav_dir, f"{stem}_watermarked.wav")
+        save_watermarked_wav(watermarked_audio, sample_rate, wav_out_path)
+        print(f"  Saved watermarked WAV: {wav_out_path}")
 
+        # To detect the messages in the high-level.
+        result, message = detector.detect_watermark(watermarked_audio)
+        print(f"Detect messages in the high-level: Audio: {audio_file}, Result: {result}, Message: {message}")
+
+        # To detect the messages in the low-level.
+        result, message = detector(watermarked_audio)
+
+        # result is a tensor of size batch x 2 x frames, indicating the probability (positive and negative) of watermarking for each frame
+        # A watermarked audio should have result[:, 1, :] > 0.5
+        print(f"Detect messages in the low-level: Audio: {audio_file}, Result: {result[:, 1 , :]}, Message: {message}")  
+
+        # Generate plots
         if plot_dir is not None:
-            stem, _ = os.path.splitext(audio_file)
             plot_path = os.path.join(plot_dir, f"{stem}_original_vs_watermarked.png")
             save_original_vs_watermarked_plot(
                 wav,
