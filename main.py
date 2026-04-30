@@ -267,8 +267,8 @@ def bit_error_rate(
             f"Shape mismatch: reference {tuple(reference_bits.shape)} vs estimated {tuple(estimated_bits.shape)}"
         )
 
-    print(f"[DEBUG] Reference bits: {reference_bits[:20]}")
-    print(f"[DEBUG] Estimated bits: {estimated_bits[:20]}")
+    # print(f"[DEBUG] Reference bits: {reference_bits[:20]}")
+    # print(f"[DEBUG] Estimated bits: {estimated_bits[:20]}")
 
     ref = reference_bits.detach().to(dtype=torch.int64).reshape(-1)
     est = estimated_bits.detach().to(dtype=torch.int64).reshape(-1)
@@ -282,6 +282,29 @@ def bit_accuracy(
 ) -> float:
     """Compute bit accuracy between two bit tensors (fraction of matched bits)."""
     return 1 - bit_error_rate(reference_bits, estimated_bits)
+
+def normalized_correlation(
+    reference_bits: torch.Tensor,
+    estimated_bits: torch.Tensor,
+    *,
+    eps: float = 1e-12,
+) -> float:
+    """Compute NC = <x,y> / (||x|| ||y||) between two bit tensors."""
+    if reference_bits.shape != estimated_bits.shape:
+        raise ValueError(
+            f"Shape mismatch: reference {tuple(reference_bits.shape)} vs estimated {tuple(estimated_bits.shape)}"
+        )
+
+    x = reference_bits.detach().to(dtype=torch.float32).reshape(-1)
+    y = estimated_bits.detach().to(dtype=torch.float32).reshape(-1)
+    if x.numel() == 0:
+        raise ValueError("Cannot compute NC on empty bit tensors.")
+
+    numerator = torch.dot(x, y)
+    denominator = x.norm() * y.norm()
+    if float(denominator.item()) < eps:
+        return 0.0
+    return float((numerator / denominator).item())
 
 def _resample_audio(audio: np.ndarray, original_sr: int, target_sr: int) -> np.ndarray:
     """Resample a 1-D numpy audio signal to the target sample rate."""
@@ -515,6 +538,8 @@ def main() -> None:
             )
             ber_val = bit_error_rate(bits_original, bits_watermarked)
             print(f"  BER (decoded bits mismatch rate): {ber_val:.4f}")
+            nc_val = normalized_correlation(bits_original, bits_watermarked)
+            print(f"  NC (normalized correlation): {nc_val:.4f}")
 
             # Measure ODG (requires external PEAQ backend in PATH).
             # try:
