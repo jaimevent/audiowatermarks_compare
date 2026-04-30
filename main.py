@@ -7,7 +7,9 @@ import os
 os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
 
 import argparse
+import csv
 import re
+from typing import Callable
 import shutil
 import subprocess
 import sys
@@ -28,6 +30,8 @@ import matplotlib.pyplot as plt
 
 from pesq import pesq
 import librosa
+
+from attacks import AudioEffects
 
 def convert_flac_to_wav(src_flac: str, dst_wav: str) -> None:
     """Decode FLAC and write a WAV container (float32 samples). libsndfile handles FLAC."""
@@ -361,6 +365,62 @@ def print_watermark_detection_summary(
         print(f"    [debug] message bit probabilities: {message_probs[0].detach().cpu().numpy()}")
 
 
+def watermark_file_detected(
+    detector: torch.nn.Module,
+    wav_watermarked: torch.Tensor,
+    *,
+    message_threshold: float = 0.5,
+    detection_threshold: float = 0.5,
+    file_fraction_threshold: float = 0.5,
+) -> tuple[bool, float]:
+    detect_frame_fraction, _ = detector.detect_watermark(
+        wav_watermarked,
+        message_threshold=message_threshold,
+        detection_threshold=detection_threshold,
+    )
+    frac = float(detect_frame_fraction.reshape(-1)[0].item())
+    return frac >= file_fraction_threshold, frac
+
+
+def attack_eval_specs(sample_rate: int) -> list[tuple[str, Callable[[torch.Tensor], torch.Tensor]]]:
+    """(name, fn) pairs: ``fn(watermarked_batch) -> attacked_batch``."""
+    fx = AudioEffects
+    sr = sample_rate
+    return [
+        ("identity", lambda t: fx.identity(t)),
+        ("updownresample", lambda t: fx.updownresample(t, sample_rate=sr)),
+        (
+            "random_noise",
+            lambda t: fx.random_noise(t, noise_std=0.001),
+        ),
+        ("pink_noise", lambda t: fx.pink_noise(t, noise_std=0.01)),
+        ("echo", lambda t: fx.echo(t, sample_rate=sr)),
+        (
+            "lowpass_5000_hz",
+            lambda t: fx.lowpass_filter(t, cutoff_freq=5000, sample_rate=sr),
+        ),
+        (
+            "highpass_500_hz",
+            lambda t: fx.highpass_filter(t, cutoff_freq=500, sample_rate=sr),
+        ),
+        (
+            "bandpass_300_8000_hz",
+            lambda t: fx.bandpass_filter(
+                t,
+                cutoff_freq_low=300,
+                cutoff_freq_high=8000,
+                sample_rate=sr,
+            ),
+        ),
+        ("smooth", lambda t: fx.smooth(t)),
+        ("boost_audio_20pct", lambda t: fx.boost_audio(t, amount=20)),
+        ("duck_audio_20pct", lambda t: fx.duck_audio(t, amount=20)),
+        ("shush", lambda t: fx.shush(t)),
+        # Output length may differ from input; detector still consumes variable-length tensors.
+        ("speed_random", lambda t: fx.speed(t, speed_range=(0.5, 1.5), sample_rate=sr)),
+    ]
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -459,7 +519,7 @@ def _parse_args() -> argparse.Namespace:
 
     p_attack = subparsers.add_parser(
         "attack",
-        help="Apply attacks and evaluate detection.",
+        help="Embed watermark, apply attacks from attacks.AudioEffects, then run the detector.",
     )
     p_attack.add_argument(
         "--input",
@@ -467,6 +527,47 @@ def _parse_args() -> argparse.Namespace:
         required=True,
         metavar="DIR",
         help=input_help,
+    )
+    p_attack.add_argument(
+        "--detection-threshold",
+        type=float,
+        default=0.5,
+        metavar="P",
+        help="Frame-level P(watermark) threshold (default: 0.5).",
+    )
+    p_attack.add_argument(
+        "--message-threshold",
+        type=float,
+        default=0.5,
+        metavar="P",
+        help="Message bit threshold passed to detect_watermark (default: 0.5).",
+    )
+    p_attack.add_argument(
+        "--file-fraction-threshold",
+        type=float,
+        default=0.5,
+        metavar="FRAC",
+        help="Watermark counts as detected if fraction of frames above "
+        "--detection-threshold is >= this value (default: 0.5).",
+    )
+    p_attack.add_argument(
+        "--attack-seed",
+        type=int,
+        default=42,
+        metavar="N",
+        help="RNG seed before each stochastic attack (echo, smooth, speed, …) (default: 42).",
+    )
+    p_attack.add_argument(
+        "--save-attacked",
+        default=None,
+        metavar="DIR",
+        help="Optional directory to write attacked watermarked WAVs (one subfolder per file).",
+    )
+    p_attack.add_argument(
+        "--output-attack-metrics",
+        default=None,
+        metavar="FILE",
+        help="CSV file for attack resistance matrix (default: <input>/attack_metrics.csv).",
     )
 
     return parser.parse_args()
@@ -495,6 +596,17 @@ def main() -> None:
         if args.output_metrics is not None:
             with open(args.output_metrics, "w") as f:
                 f.write(f"audio_file,snr_db,pesq_val,ber_val,nc_val\n")
+
+    attack_metric_names: list[str] = []
+    attack_metrics_csv_path = None
+    if args.command == "attack":
+        attack_metric_names = [name for name, _ in attack_eval_specs(sample_rate=16000)]
+        attack_metrics_csv_path = os.path.abspath(
+            args.output_attack_metrics or os.path.join("attack_metrics.csv")
+        )
+        with open(attack_metrics_csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["audio_file", *attack_metric_names])
 
     model = AudioSeal.load_generator(args.generator)
     model.eval()
@@ -614,10 +726,83 @@ def main() -> None:
                 show_raw=bool(args.debug),
             )
 
-        # Attack
+        # Attack: embed watermark, apply AudioEffects attacks, verify detector robustness.
         if args.command == "attack":
-            pass
-            return
+            watermark = model.get_watermark(wav)
+            watermarked_audio = wav + watermark
+            if torch.cuda.is_available():
+                watermarked_audio = watermarked_audio.cuda()
+
+            msg_t = args.message_threshold
+            det_t = args.detection_threshold
+            frac_t = args.file_fraction_threshold
+
+            base_ok, base_frac = watermark_file_detected(
+                detector,
+                watermarked_audio,
+                message_threshold=msg_t,
+                detection_threshold=det_t,
+                file_fraction_threshold=frac_t,
+            )
+            status = "detected (resisted)" if base_ok else "NOT detected"
+            print(
+                f"  Baseline (watermarked, no attack): {status}; "
+                f"frame fraction P(wm)>{det_t}: {base_frac:.1%}"
+            )
+
+            attacked_root = (
+                os.path.abspath(args.save_attacked)
+                if args.save_attacked
+                else None
+            )
+            stem, _ = os.path.splitext(audio_file)
+            attacked_dir = None
+            if attacked_root is not None:
+                attacked_dir = os.path.join(attacked_root, stem)
+                os.makedirs(attacked_dir, exist_ok=True)
+
+            specs = attack_eval_specs(sample_rate)
+            attack_row: dict[str, str] = {name: "-" for name in attack_metric_names}
+            for atk_idx, (attack_name, attack_fn) in enumerate(specs):
+                torch.manual_seed(args.attack_seed + atk_idx * 10_007)
+                with torch.no_grad():
+                    attacked_wm = attack_fn(watermarked_audio)
+                attacked_wm = attacked_wm.contiguous()
+
+                resisted, frac_wm = watermark_file_detected(
+                    detector,
+                    attacked_wm,
+                    message_threshold=msg_t,
+                    detection_threshold=det_t,
+                    file_fraction_threshold=frac_t,
+                )
+                verdict = (
+                    "watermark still detected (attack resisted)"
+                    if resisted
+                    else "watermark NOT detected (attack succeeded)"
+                )
+                attack_row[attack_name] = "X" if resisted else "-"
+                atk_sr = sample_rate
+                if attacked_wm.shape[-1] != watermarked_audio.shape[-1]:
+                    print(
+                        f"  Attack {attack_name!r}: {verdict}; "
+                        f"P(wm)>{det_t} frame fraction={frac_wm:.1%}; "
+                        f"[length {watermarked_audio.shape[-1]} -> {attacked_wm.shape[-1]} samples]"
+                    )
+                else:
+                    print(
+                        f"  Attack {attack_name!r}: {verdict}; "
+                        f"P(wm)>{det_t} frame fraction={frac_wm:.1%}"
+                    )
+
+                if attacked_dir is not None:
+                    out_wav = os.path.join(attacked_dir, f"{stem}_{attack_name}.wav")
+                    save_watermarked_wav(attacked_wm, atk_sr, out_wav)
+
+            if attack_metrics_csv_path is not None:
+                with open(attack_metrics_csv_path, "a", newline="", encoding="utf-8") as f:
+                    writer = csv.writer(f)
+                    writer.writerow([audio_file, *[attack_row[name] for name in attack_metric_names]])
 
 if __name__ == "__main__":
     try:

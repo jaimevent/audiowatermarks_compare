@@ -16,3 +16,5 @@ soundfile>=0.12
 matplotlib>=3.7
 pesq
 librosa
+# attacks.AudioEffects uses julius for resampling / filters / conv.
+julius>=0.2
