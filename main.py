@@ -7,6 +7,9 @@ import os
 os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
 
 import argparse
+import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import warnings
@@ -175,6 +178,110 @@ def pesq_score(
 
     mode = "wb" if sample_rate == 16000 else "nb"
     return float(pesq(sample_rate, ref, deg, mode))
+
+# For the moment not used due to the lack of a PEAQ backend in PATH
+def odg_score(
+    wav_original: torch.Tensor,
+    wav_watermarked: torch.Tensor,
+    sample_rate: int,
+) -> float:
+    """ODG score via an external PEAQ backend (gstpeaq/peaqb).
+
+    ODG is defined in ITU-R BS.1387 (PEAQ) and typically ranges in [-4, 0].
+    """
+    if wav_original.shape != wav_watermarked.shape:
+        raise ValueError(
+            f"Shape mismatch: original {tuple(wav_original.shape)} vs watermarked {tuple(wav_watermarked.shape)}"
+        )
+    if wav_original.dim() != 3:
+        raise ValueError(
+            f"Expected tensors of rank 3 (batch, channels, samples); got {wav_original.dim()}"
+        )
+
+    ref = _to_mono_numpy(wav_original[0]).astype(np.float32, copy=False)
+    deg = _to_mono_numpy(wav_watermarked[0]).astype(np.float32, copy=False)
+
+    # Most open PEAQ tools expect 48 kHz input.
+    if sample_rate != 48000:
+        ref = _resample_audio(ref, sample_rate, 48000)
+        deg = _resample_audio(deg, sample_rate, 48000)
+        sample_rate = 48000
+
+    backend = shutil.which("gstpeaq") or shutil.which("peaqb")
+    if backend is None:
+        raise RuntimeError(
+            "No PEAQ backend found. Install 'gstpeaq' or 'peaqb' and make it available in PATH."
+        )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ref_path = os.path.join(tmpdir, "ref.wav")
+        deg_path = os.path.join(tmpdir, "deg.wav")
+        # PCM_16 maximizes compatibility with command-line PEAQ tools.
+        sf.write(ref_path, ref, sample_rate, format="WAV", subtype="PCM_16")
+        sf.write(deg_path, deg, sample_rate, format="WAV", subtype="PCM_16")
+
+        candidate_cmds = []
+        exe_name = os.path.basename(backend).lower()
+        if "gstpeaq" in exe_name:
+            candidate_cmds = [
+                [backend, "--basic", ref_path, deg_path],
+                [backend, ref_path, deg_path],
+            ]
+        else:
+            candidate_cmds = [[backend, ref_path, deg_path]]
+
+        output = ""
+        for cmd in candidate_cmds:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            output = (proc.stdout or "") + "\n" + (proc.stderr or "")
+            if proc.returncode == 0:
+                break
+        else:
+            raise RuntimeError(
+                f"PEAQ backend execution failed. Last output:\n{output.strip()}"
+            )
+
+    match = re.search(
+        r"(?:ODG|Objective Difference Grade)\s*[:=]?\s*(-?\d+(?:\.\d+)?)",
+        output,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        raise RuntimeError(
+            f"Could not parse ODG from backend output:\n{output.strip()}"
+        )
+    return float(match.group(1))
+
+def bit_error_rate(
+    reference_bits: torch.Tensor,
+    estimated_bits: torch.Tensor,
+) -> float:
+    """Compute BER between two bit tensors (fraction of mismatched bits)."""
+    if reference_bits.shape != estimated_bits.shape:
+        raise ValueError(
+            f"Shape mismatch: reference {tuple(reference_bits.shape)} vs estimated {tuple(estimated_bits.shape)}"
+        )
+
+    print(f"[DEBUG] Reference bits: {reference_bits[:20]}")
+    print(f"[DEBUG] Estimated bits: {estimated_bits[:20]}")
+
+    ref = reference_bits.detach().to(dtype=torch.int64).reshape(-1)
+    est = estimated_bits.detach().to(dtype=torch.int64).reshape(-1)
+    if ref.numel() == 0:
+        raise ValueError("Cannot compute BER on empty bit tensors.")
+    return float((ref != est).float().mean().item())
+
+def bit_accuracy(
+    reference_bits: torch.Tensor,
+    estimated_bits: torch.Tensor,
+) -> float:
+    """Compute bit accuracy between two bit tensors (fraction of matched bits)."""
+    return 1 - bit_error_rate(reference_bits, estimated_bits)
 
 def _resample_audio(audio: np.ndarray, original_sr: int, target_sr: int) -> np.ndarray:
     """Resample a 1-D numpy audio signal to the target sample rate."""
@@ -387,11 +494,34 @@ def main() -> None:
             # ------- Start of metrics -------
             # Measure SNR
             snr_db = watermarking_snr_db(wav, watermarked_audio)
-            print(f"  Watermark SNR (original vs residual): {snr_db:.2f} dB")
+            print(f"  SNR (original vs residual): {snr_db:.2f} dB")
 
             # Measure PESQ
-            pesq = pesq_score(wav, watermarked_audio, sample_rate)
-            print(f"  PESQ score: {pesq:.2f}")
+            pesq_val = pesq_score(wav, watermarked_audio, sample_rate)
+            print(f"  PESQ score: {pesq_val:.2f}")
+
+            # Measure BER as decoded-bit mismatch rate (original vs watermarked).
+            # This is a detector-based proxy BER when explicit payload ground-truth
+            # bits are not provided by the embedding call.
+            _, bits_original = detector.detect_watermark(
+                wav,
+                message_threshold=0.5,
+                detection_threshold=0.5,
+            )
+            _, bits_watermarked = detector.detect_watermark(
+                watermarked_audio,
+                message_threshold=0.5,
+                detection_threshold=0.5,
+            )
+            ber_val = bit_error_rate(bits_original, bits_watermarked)
+            print(f"  BER (decoded bits mismatch rate): {ber_val:.4f}")
+
+            # Measure ODG (requires external PEAQ backend in PATH).
+            # try:
+            #    odg_val = odg_score(wav, watermarked_audio, sample_rate)
+            #    print(f"  ODG score: {odg_val:.2f}")
+            #except RuntimeError as exc:
+            #    print(f"  ODG score: unavailable ({exc})")
             
             # ------- End of metrics -------
 
@@ -412,7 +542,7 @@ def main() -> None:
                     out_path=plot_path,
                     dpi=args.plot_dpi,
                 )
-                print(f"  Saved plot: {plot_path}")
+                print(f"  Saved plot: {stem}_original_vs_watermarked.png")
 
         # Detect watermark
         if args.command == "detect":
