@@ -23,6 +23,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+from pesq import pesq
+import librosa
 
 def convert_flac_to_wav(src_flac: str, dst_wav: str) -> None:
     """Decode FLAC and write a WAV container (float32 samples). libsndfile handles FLAC."""
@@ -147,6 +149,40 @@ def watermarking_snr_db(
     power_noise = (noise * noise).mean().clamp_min(eps)
     return (10.0 * torch.log10(power_signal / power_noise)).item()
 
+def pesq_score(
+    wav_original: torch.Tensor,
+    wav_watermarked: torch.Tensor,
+    sample_rate: int = 16000,
+) -> float:
+    """PESQ score of the original versus the watermarked audio."""
+    if wav_original.shape != wav_watermarked.shape:
+        raise ValueError(
+            f"Shape mismatch: original {tuple(wav_original.shape)} vs watermarked {tuple(wav_watermarked.shape)}"
+        )
+    if wav_original.dim() != 3:
+        raise ValueError(
+            f"Expected tensors of rank 3 (batch, channels, samples); got {wav_original.dim()}"
+        )
+    # PESQ expects 1-D numpy arrays (mono float32).
+    ref = _to_mono_numpy(wav_original[0]).astype(np.float32, copy=False)
+    deg = _to_mono_numpy(wav_watermarked[0]).astype(np.float32, copy=False)
+
+    # PESQ only supports 8 kHz (nb) and 16 kHz (wb): resample other rates to 16 kHz.
+    if sample_rate not in (8000, 16000):
+        ref = _resample_audio(ref, sample_rate, 16000)
+        deg = _resample_audio(deg, sample_rate, 16000)
+        sample_rate = 16000
+
+    mode = "wb" if sample_rate == 16000 else "nb"
+    return float(pesq(sample_rate, ref, deg, mode))
+
+def _resample_audio(audio: np.ndarray, original_sr: int, target_sr: int) -> np.ndarray:
+    """Resample a 1-D numpy audio signal to the target sample rate."""
+    if original_sr == target_sr:
+        return audio
+
+    resampled = librosa.resample(audio, orig_sr=original_sr, target_sr=target_sr)
+    return np.asarray(resampled, dtype=np.float32)
 
 def print_watermark_detection_summary(
     *,
@@ -347,9 +383,17 @@ def main() -> None:
 
             if torch.cuda.is_available():
                 watermarked_audio = watermarked_audio.cuda()
+            
+            # ------- Start of metrics -------
             # Measure SNR
             snr_db = watermarking_snr_db(wav, watermarked_audio)
             print(f"  Watermark SNR (original vs residual): {snr_db:.2f} dB")
+
+            # Measure PESQ
+            pesq = pesq_score(wav, watermarked_audio, sample_rate)
+            print(f"  PESQ score: {pesq:.2f}")
+            
+            # ------- End of metrics -------
 
             # Save watermarked audio
             stem, _ = os.path.splitext(audio_file)
