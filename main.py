@@ -406,11 +406,25 @@ def _parse_args() -> argparse.Namespace:
         help=input_help,
     )
     p_watermark.add_argument(
+        "--algorithm",
+        "-a",
+        default="audioseal",
+        metavar="ALGORITHM",
+        help="Algorithm to use (default: audioseal).",
+    )
+    p_watermark.add_argument(
         "--output-plot",
         "-o",
         default=None,
         metavar="DIR",
         help="Directory for PNG plots (default: <input>/audioseal_plots).",
+    )
+    p_watermark.add_argument(
+        "--output-metrics",
+        "-m",
+        default=None,
+        metavar="FILE",
+        help="File for metrics (default: <input>/metrics.csv).",
     )
     p_watermark.add_argument(
         "--no-plots",
@@ -476,6 +490,11 @@ def main() -> None:
             args.output_watermarked or os.path.join(audio_folder, "watermarked_wav")
         )
         os.makedirs(watermarked_wav_dir, exist_ok=True)
+
+        # Create metrics file
+        if args.output_metrics is not None:
+            with open(args.output_metrics, "w") as f:
+                f.write(f"audio_file,snr_db,pesq_val,ber_val,nc_val\n")
 
     model = AudioSeal.load_generator(args.generator)
     model.eval()
@@ -548,6 +567,12 @@ def main() -> None:
             #except RuntimeError as exc:
             #    print(f"  ODG score: unavailable ({exc})")
             
+            # Save metrics to CSV
+            if args.output_metrics is not None:
+                with open(args.output_metrics, "a") as f:
+                    f.write(f"{audio_file},{snr_db:.2f},{pesq_val:.2f},{ber_val:.4f},{nc_val:.4f}\n")
+                print(f"  Saved metrics to {args.output_metrics}")
+
             # ------- End of metrics -------
 
             # Save watermarked audio
