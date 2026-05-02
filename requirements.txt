@@ -20,3 +20,4 @@ librosa
 julius>=0.2
 
 wavmark
+silentcipher
