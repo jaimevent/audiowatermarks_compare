@@ -19,7 +19,7 @@ htmlcov/
 *.mp3
 .DS_Store
 *.zip
-plot/
+plots/
 *.png
 *.csv
 metrics/

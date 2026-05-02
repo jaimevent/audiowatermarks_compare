@@ -18,3 +18,5 @@ pesq
 librosa
 # attacks.AudioEffects uses julius for resampling / filters / conv.
 julius>=0.2
+
+wavmark
