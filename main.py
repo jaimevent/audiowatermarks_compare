@@ -32,7 +32,14 @@ from pesq import pesq
 import librosa
 
 from attacks import attack_eval_specs
-from watermark_plots import close_all_figures, save_original_vs_watermarked_plot, waveform_to_mono_numpy
+from watermark_plots import (
+    attack_row_values_to_binary,
+    close_all_figures,
+    save_attack_summary_bar_chart,
+    save_attack_summary_heatmap,
+    save_original_vs_watermarked_plot,
+    waveform_to_mono_numpy,
+)
 
 
 def convert_flac_to_wav(src_flac: str, dst_wav: str) -> None:
@@ -465,6 +472,28 @@ def _parse_args() -> argparse.Namespace:
             "(default: attack_metrics.csv; final name is prefixed with timestamp)."
         ),
     )
+    p_attack.add_argument(
+        "--output-attack-plot",
+        "-o",
+        default=None,
+        metavar="DIR",
+        help=(
+            "Directory for attack robustness summary PNGs (heatmap + bar chart). "
+            "Default: plots/attack_summary (relative to current working directory)."
+        ),
+    )
+    p_attack.add_argument(
+        "--no-attack-plots",
+        action="store_true",
+        help="Skip attack robustness summary heatmap and bar chart.",
+    )
+    p_attack.add_argument(
+        "--attack-plot-dpi",
+        type=int,
+        default=150,
+        metavar="N",
+        help="Resolution of attack summary PNGs (default: 150).",
+    )
     attach_algorithm_arguments(p_attack)
 
     return parser.parse_args()
@@ -519,6 +548,12 @@ def main() -> None:
             write_attack_metrics_header(am_path, attack_metric_names)
             print(f"{algorithm} attack metrics CSV: {am_path}")
 
+    attack_plot_dir: str | None = None
+    if args.command == "attack" and not args.no_attack_plots:
+        attack_plot_dir = os.path.abspath(args.output_attack_plot or os.path.join("plots", "attack_summary"))
+        os.makedirs(attack_plot_dir, exist_ok=True)
+        print(f"Attack robustness plots (heatmap + bars): {attack_plot_dir}")
+
     detect_log_by_algorithm: dict[str, str] = {}
     if args.command == "detect":
         for algorithm in algorithms:
@@ -541,6 +576,9 @@ def main() -> None:
         backend.setup(args.command)
 
         print(f"You've selected the following command: {args.command}")
+
+        attack_resistance_rows: list[list[int]] = []
+        attack_resistance_labels: list[str] = []
 
         for audio_file in audio_files:
             print(f"---- Processing audio file: {audio_file} for {algorithm} ----")
@@ -664,6 +702,35 @@ def main() -> None:
                         attack_metric_names=attack_metric_names,
                         attack_row=attack_row,
                     )
+                attack_resistance_rows.append(
+                    attack_row_values_to_binary(attack_row, attack_metric_names)
+                )
+                attack_resistance_labels.append(audio_file)
+
+        if (
+            args.command == "attack"
+            and attack_plot_dir is not None
+            and attack_metric_names
+            and attack_resistance_rows
+        ):
+            heatmap_path = os.path.join(attack_plot_dir, f"{algorithm}_attack_resistance_heatmap.png")
+            bars_path = os.path.join(attack_plot_dir, f"{algorithm}_attack_resistance_bars.png")
+            save_attack_summary_heatmap(
+                np.array(attack_resistance_rows, dtype=np.float64),
+                attack_resistance_labels,
+                attack_metric_names,
+                algorithm=algorithm,
+                out_path=heatmap_path,
+                dpi=int(args.attack_plot_dpi),
+            )
+            save_attack_summary_bar_chart(
+                np.array(attack_resistance_rows, dtype=np.float64),
+                attack_metric_names,
+                algorithm=algorithm,
+                out_path=bars_path,
+                dpi=int(args.attack_plot_dpi),
+            )
+            print(f"  Saved attack summary PNGs: {heatmap_path}, {bars_path}")
 
 if __name__ == "__main__":
     try:
