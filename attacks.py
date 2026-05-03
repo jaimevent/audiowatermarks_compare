@@ -10,10 +10,13 @@
 #
 #
 import typing as tp
+from collections.abc import Callable
 
 import julius
 import torch
 import torch.nn.functional as F
+
+TorchTensor = torch.Tensor
 
 
 def generate_pink_noise(length: int) -> torch.Tensor:
@@ -307,3 +310,40 @@ class AudioEffects:
         shush_tensor[:, :, :int(fraction*time)] = 0.0
                 
         return audio_effect_return(tensor=shush_tensor, mask=mask)
+
+
+def attack_eval_specs(
+    sample_rate: int,
+) -> list[tuple[str, Callable[[TorchTensor], TorchTensor]]]:
+    """(name, fn) pairs: ``fn(watermarked_batch) -> attacked_batch``."""
+    fx = AudioEffects
+    sr = sample_rate
+    return [
+        ("identity", lambda t: fx.identity(t)),
+        ("updownresample", lambda t: fx.updownresample(t, sample_rate=sr)),
+        ("random_noise", lambda t: fx.random_noise(t, noise_std=0.001)),
+        ("pink_noise", lambda t: fx.pink_noise(t, noise_std=0.01)),
+        ("echo", lambda t: fx.echo(t, sample_rate=sr)),
+        (
+            "lowpass_5000_hz",
+            lambda t: fx.lowpass_filter(t, cutoff_freq=5000, sample_rate=sr),
+        ),
+        (
+            "highpass_500_hz",
+            lambda t: fx.highpass_filter(t, cutoff_freq=500, sample_rate=sr),
+        ),
+        (
+            "bandpass_300_8000_hz",
+            lambda t: fx.bandpass_filter(
+                t,
+                cutoff_freq_low=300,
+                cutoff_freq_high=8000,
+                sample_rate=sr,
+            ),
+        ),
+        ("smooth", lambda t: fx.smooth(t)),
+        ("boost_audio_20pct", lambda t: fx.boost_audio(t, amount=20)),
+        ("duck_audio_20pct", lambda t: fx.duck_audio(t, amount=20)),
+        ("shush", lambda t: fx.shush(t)),
+        ("speed_random", lambda t: fx.speed(t, speed_range=(0.5, 1.5), sample_rate=sr)),
+    ]
