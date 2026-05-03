@@ -8,11 +8,13 @@ from typing import Type
 from .audioseal_backend import AudiosealBackend
 from .base import WatermarkBackend
 from .wavmark_backend import WavmarkBackend
+from .silentcipher_backend import SilentCipherBackend
 
 # To add an algorithm: implement ``WatermarkBackend``, import it here, and register.
 ALGORITHM_REGISTRY: dict[str, Type[WatermarkBackend]] = {
     "audioseal": AudiosealBackend,
     "wavmark": WavmarkBackend,
+    "silentcipher": SilentCipherBackend,
 }
 
 ALGORITHM_IDS: tuple[str, ...] = tuple(sorted(ALGORITHM_REGISTRY.keys()))

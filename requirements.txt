@@ -20,4 +20,8 @@ librosa
 julius>=0.2
 
 wavmark
-silentcipher
+
+# SilentCipher / PyTorch: PyPI silentcipher (= Sony release) declares torch<=2.0.0, so pip
+# cannot resolve it together with torch 2.11 above. SesameAILabs' fork bumps deps to
+# torch>=2.4 and torchaudio>=2.4 (same codebase, installable beside AudioSeal/WavMark).
+silentcipher @ git+https://github.com/SesameAILabs/silentcipher.git

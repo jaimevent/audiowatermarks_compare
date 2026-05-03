@@ -216,6 +216,38 @@ def _resample_audio(audio: np.ndarray, original_sr: int, target_sr: int) -> np.n
     return np.asarray(resampled, dtype=np.float32)
 
 
+def _load_hf_token_from_path(path: str) -> bool:
+    """If ``path`` exists, read the first line as token and set Hub env vars.
+
+    Returns True if the token was applied. Never logs the token.
+    Missing file, read errors, or empty/comment first line → False (caller may fall back).
+    """
+    if not os.path.isfile(path):
+        return False
+    try:
+        with open(path, encoding="utf-8") as f:
+            token = f.readline().strip()
+    except OSError:
+        return False
+    if not token or token.startswith("#"):
+        return False
+    os.environ["HF_TOKEN"] = token
+    os.environ["HUGGING_FACE_HUB_TOKEN"] = token
+    return True
+
+
+def _configure_hf_token_from_repo_file() -> None:
+    """Prefer ``.hf_token`` or ``hf_token.txt`` beside ``main.py``; else leave env unchanged.
+
+    If neither file yields a token, ``HF_TOKEN`` / ``HUGGING_FACE_HUB_TOKEN`` already set in
+    the environment (or absent) are used by ``huggingface_hub`` as usual.
+    """
+    repo_root = os.path.dirname(os.path.abspath(__file__))
+    for name in (".hf_token", "hf_token.txt"):
+        if _load_hf_token_from_path(os.path.join(repo_root, name)):
+            return
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -239,6 +271,26 @@ def _parse_args() -> argparse.Namespace:
         "--debug",
         default=True,
         help="Show debug information.",
+    )
+    parser.add_argument(
+        "--silentcipher-model",
+        default="44.1k",
+        choices=("44.1k", "16k"),
+        metavar="TYPE",
+        help=(
+            "SilentCipher checkpoint family (44.1 kHz vs 16 kHz model; "
+            "default: 44.1k). Ignored unless algorithm is silentcipher."
+        ),
+    )
+    parser.add_argument(
+        "--silentcipher-phase-shift",
+        action="store_true",
+        dest="silentcipher_phase_shift",
+        help=(
+            "SilentCipher decode_wav(..., phase_shift_decoding=True) for watermark/detect: "
+            "slower, more robust to crops. The attack command always uses phase-shift decode "
+            "for SilentCipher. Ignored unless algorithm is silentcipher."
+        ),
     )
 
     subparsers = parser.add_subparsers(
@@ -418,6 +470,7 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 def main() -> None:
+    _configure_hf_token_from_repo_file()
     args = _parse_args()
 
     audio_folder = os.path.abspath(args.input)
