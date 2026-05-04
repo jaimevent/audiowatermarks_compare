@@ -144,6 +144,9 @@ class AudiosealBackend(WatermarkBackend):
         return self._detector
 
     def prepare_wav_tensor(self, wav: torch.Tensor) -> torch.Tensor:
+        # Convert to mono by averaging channels if stereo
+        if wav.shape[0] > 1:
+            wav = wav.mean(dim=0, keepdim=True)
         if torch.cuda.is_available():
             return wav.cuda()
         return wav

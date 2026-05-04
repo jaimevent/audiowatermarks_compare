@@ -5,6 +5,7 @@ import os
 # AudioSeal wraps the encoder with torch.compile; Inductor on Windows needs MSVC (cl.exe).
 # Without Build Tools, compilation fails. Disable Dynamo before importing torch.
 os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import argparse
 import re
@@ -15,6 +16,7 @@ import tempfile
 import torch
 
 torch._dynamo.config.disable = True  # belt-and-suspenders if env above is ignored
+torch.cuda.empty_cache()
 
 import numpy as np
 import soundfile as sf
@@ -584,6 +586,13 @@ def main() -> None:
             print(f"---- Processing audio file: {audio_file} for {algorithm} ----")
             audio_path = os.path.join(audio_folder, audio_file)
             wav, sample_rate = load_audio(audio_path)
+
+            # Skip if audio is too long to avoid OOM
+            max_samples = 16000 * 60  # 1 minutes at 16 kHz
+            if wav.shape[-1] > max_samples:
+                print(f"  Audio file {audio_file} is too long ({wav.shape[-1] / sample_rate:.1f} seconds), skipping.")
+                continue
+            
             wav = backend.prepare_wav_tensor(wav)
             wav = wav.unsqueeze(0)
 
@@ -645,6 +654,10 @@ def main() -> None:
                         dpi=args.plot_dpi,
                     )
 
+                # Free GPU memory for watermark command
+                del metrics_ref
+                del watermarked_audio
+
             if args.command == "detect":
                 backend.run_detect(
                     wav,
@@ -693,6 +706,9 @@ def main() -> None:
                         out_wav = os.path.join(attacked_dir, f"{stem}_{attack_name}.wav")
                         save_watermarked_wav(attacked_wm, atk_sr, out_wav)
 
+                    # Free memory after each attack
+                    del attacked_wm
+
                 attack_csv = attack_metrics_by_algorithm.get(algorithm)
                 if attack_csv is not None:
                     append_attack_metrics_row(
@@ -706,6 +722,17 @@ def main() -> None:
                     attack_row_values_to_binary(attack_row, attack_metric_names)
                 )
                 attack_resistance_labels.append(audio_file)
+
+                # Free GPU memory for attack command
+                del wav_wm
+
+            # Free common GPU memory
+            del wav
+            torch.cuda.empty_cache()
+
+        # Free backend and models after processing all files for this algorithm
+        del backend
+        torch.cuda.empty_cache()
 
         if (
             args.command == "attack"
