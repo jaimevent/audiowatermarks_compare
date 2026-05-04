@@ -59,6 +59,7 @@ class WatermarkBackend(ABC):
         sample_rate: int,
         audio_file: str,
         detect_log_path: str | None,
+        elapsed_ms: float | None = None,
     ) -> None:
         """Decode / detect and append CSV row if ``detect_log_path`` is set."""
 

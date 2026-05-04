@@ -23,11 +23,13 @@ DETECTION_LOG_HEADER: list[str] = [
     "max_p_wm",
     "decoded_message_binary",
     "message_probs",
+    "processing_ms",
 ]
 
 WATERMARK_METRICS_HEADER: list[str] = [
     "audio_file",
     "algorithm",
+    "processing_ms",
     "snr_db",
     "pesq_val",
     "ber_val",
@@ -57,6 +59,7 @@ def append_watermark_metrics_row(
     *,
     audio_file: str,
     algorithm: str,
+    processing_ms: float,
     snr_db: float,
     pesq_val: float,
     ber_val: float,
@@ -67,6 +70,7 @@ def append_watermark_metrics_row(
             [
                 audio_file,
                 algorithm,
+                round(processing_ms, 2),
                 round(snr_db, 2),
                 round(pesq_val, 2),
                 round(ber_val, 4),
@@ -77,7 +81,9 @@ def append_watermark_metrics_row(
 
 def write_attack_metrics_header(path: str, attack_metric_names: list[str]) -> None:
     with open(path, "w", newline="", encoding="utf-8") as f:
-        csv.writer(f).writerow(["audio_file", "algorithm", *attack_metric_names])
+        csv.writer(f).writerow(
+            ["audio_file", "algorithm", "processing_ms", *attack_metric_names]
+        )
 
 
 def append_attack_metrics_row(
@@ -85,12 +91,18 @@ def append_attack_metrics_row(
     *,
     audio_file: str,
     algorithm: str,
+    processing_ms: float,
     attack_metric_names: list[str],
     attack_row: dict[str, str],
 ) -> None:
     with open(path, "a", newline="", encoding="utf-8") as f:
         csv.writer(f).writerow(
-            [audio_file, algorithm, *[attack_row[name] for name in attack_metric_names]]
+            [
+                audio_file,
+                algorithm,
+                round(processing_ms, 2),
+                *[attack_row[name] for name in attack_metric_names],
+            ]
         )
 
 

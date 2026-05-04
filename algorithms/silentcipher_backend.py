@@ -12,6 +12,7 @@ from typing import ClassVar
 import numpy as np
 import soundfile as sf
 import silentcipher
+import time
 import torch
 
 from bit_metrics import normalized_correlation
@@ -113,6 +114,7 @@ def detection_log_csv_row_silentcipher(
     detection_threshold: float,
     file_fraction_threshold: float,
     result: dict,
+    elapsed_ms: float | None = None,
 ) -> list:
     """Map SilentCipher decode output into the shared detection CSV schema."""
     status = bool(result.get("status"))
@@ -123,7 +125,7 @@ def detection_log_csv_row_silentcipher(
     conf0 = float(confidences[0]) if confidences else float("nan")
     bit_str = ";".join(str(int(x)) for x in msg0) if msg0 else ""
 
-    return [
+    row = [
         audio_file,
         algorithm,
         detected,
@@ -141,6 +143,9 @@ def detection_log_csv_row_silentcipher(
         bit_str,
         "",
     ]
+    if elapsed_ms is not None:
+        row.append(round(elapsed_ms, 2))
+    return row
 
 
 class SilentCipherBackend(WatermarkBackend):
@@ -217,8 +222,10 @@ class SilentCipherBackend(WatermarkBackend):
         sample_rate: int,
         audio_file: str,
         detect_log_path: str | None,
+        elapsed_ms: float | None = None,
     ) -> None:
         args = self.args
+        start = time.perf_counter()
         y = wav_batch_to_mono_numpy(wav_batched)
         result = self._model.decode_wav(
             y,
@@ -227,6 +234,7 @@ class SilentCipherBackend(WatermarkBackend):
         )
         print_silentcipher_detection_summary(result=result, show_raw=bool(args.debug))
         if detect_log_path is not None:
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
             row = detection_log_csv_row_silentcipher(
                 audio_file,
                 self.name,
@@ -235,6 +243,7 @@ class SilentCipherBackend(WatermarkBackend):
                 detection_threshold=args.detection_threshold,
                 file_fraction_threshold=args.file_fraction_threshold,
                 result=result,
+                elapsed_ms=elapsed_ms,
             )
             with open(detect_log_path, "a", newline="", encoding="utf-8") as f:
                 csv.writer(f).writerow(row)

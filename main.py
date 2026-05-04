@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import torch
 
 torch._dynamo.config.disable = True  # belt-and-suspenders if env above is ignored
@@ -597,6 +598,7 @@ def main() -> None:
             wav = wav.unsqueeze(0)
 
             if args.command == "watermark":
+                start = time.perf_counter()
                 watermarked_wav_dir = os.path.abspath(
                     args.output_watermarked or os.path.join(audio_folder, f"{algorithm}_watermarked_wav")
                 )
@@ -628,18 +630,6 @@ def main() -> None:
                 backend.print_ber_line(ber_val)
                 print(f"  NC: {nc_val:.3f}")
 
-                wm_csv = watermark_metrics_by_algorithm.get(algorithm)
-                if wm_csv is not None:
-                    append_watermark_metrics_row(
-                        wm_csv,
-                        audio_file=audio_file,
-                        algorithm=algorithm,
-                        snr_db=snr_db,
-                        pesq_val=pesq_val,
-                        ber_val=ber_val,
-                        nc_val=nc_val,
-                    )
-
                 if not args.no_plots and plot_dir is not None:
                     plot_path = os.path.join(
                         plot_dir, f"{stem}_{algorithm}_original_vs_watermarked.png"
@@ -652,6 +642,20 @@ def main() -> None:
                         suptitle=f"{algorithm}: {audio_file} — original vs watermarked",
                         out_path=plot_path,
                         dpi=args.plot_dpi,
+                    )
+
+                processing_ms = (time.perf_counter() - start) * 1000.0
+                wm_csv = watermark_metrics_by_algorithm.get(algorithm)
+                if wm_csv is not None:
+                    append_watermark_metrics_row(
+                        wm_csv,
+                        audio_file=audio_file,
+                        algorithm=algorithm,
+                        processing_ms=processing_ms,
+                        snr_db=snr_db,
+                        pesq_val=pesq_val,
+                        ber_val=ber_val,
+                        nc_val=nc_val,
                     )
 
                 # Free GPU memory for watermark command
@@ -667,6 +671,7 @@ def main() -> None:
                 )
 
             if args.command == "attack":
+                start = time.perf_counter()
                 msg_t = args.message_threshold
                 det_t = args.detection_threshold
                 frac_t = args.file_fraction_threshold
@@ -709,12 +714,14 @@ def main() -> None:
                     # Free memory after each attack
                     del attacked_wm
 
+                processing_ms = (time.perf_counter() - start) * 1000.0
                 attack_csv = attack_metrics_by_algorithm.get(algorithm)
                 if attack_csv is not None:
                     append_attack_metrics_row(
                         attack_csv,
                         audio_file=audio_file,
                         algorithm=algorithm,
+                        processing_ms=processing_ms,
                         attack_metric_names=attack_metric_names,
                         attack_row=attack_row,
                     )

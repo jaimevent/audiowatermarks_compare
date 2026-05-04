@@ -7,6 +7,7 @@ from typing import ClassVar
 
 import numpy as np
 import soundfile as sf
+import time
 import torch
 import wavmark as wm
 from wavmark.utils import wm_add_util as wavmark_wm_add_util
@@ -90,6 +91,7 @@ def detection_log_csv_row_wavmark(
     wav_16k: np.ndarray,
     payload_decoded: np.ndarray | None,
     decode_info: dict,
+    elapsed_ms: float | None = None,
 ) -> list:
     """CSV row aligned with detection log header using WavMark decode statistics."""
 
@@ -118,7 +120,7 @@ def detection_log_csv_row_wavmark(
     else:
         bit_str = ""
 
-    return [
+    row = [
         audio_file,
         algorithm,
         detected,
@@ -136,6 +138,9 @@ def detection_log_csv_row_wavmark(
         bit_str,
         "",
     ]
+    if elapsed_ms is not None:
+        row.append(round(elapsed_ms, 2))
+    return row
 
 
 class WavmarkBackend(WatermarkBackend):
@@ -207,8 +212,10 @@ class WavmarkBackend(WatermarkBackend):
         sample_rate: int,
         audio_file: str,
         detect_log_path: str | None,
+        elapsed_ms: float | None = None,
     ) -> None:
         args = self.args
+        start = time.perf_counter()
         wm_mono = wavmark_mono_16k_tensor(wav_batched, sample_rate)
         payload_decoded, decode_info, wav_16k = wavmark_decode_watermark(
             self._wmmodel, wm_mono, show_progress=False
@@ -220,6 +227,7 @@ class WavmarkBackend(WatermarkBackend):
             show_raw=bool(args.debug),
         )
         if detect_log_path is not None:
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
             row = detection_log_csv_row_wavmark(
                 audio_file,
                 self.name,
@@ -230,6 +238,7 @@ class WavmarkBackend(WatermarkBackend):
                 wav_16k=wav_16k,
                 payload_decoded=payload_decoded,
                 decode_info=decode_info,
+                elapsed_ms=elapsed_ms,
             )
             with open(detect_log_path, "a", newline="", encoding="utf-8") as f:
                 csv.writer(f).writerow(row)

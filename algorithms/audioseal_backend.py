@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import time
 from typing import ClassVar
 
 import torch
@@ -87,6 +88,7 @@ def detection_log_csv_row_audioseal(
     binary_message: torch.Tensor,
     frame_logits: torch.Tensor,
     message_probs: torch.Tensor,
+    elapsed_ms: float | None = None,
 ) -> list:
     """One row for detection log CSV; ``detected`` is ``X`` or ``-``."""
     frac = float(detect_frame_fraction.reshape(-1)[0].item())
@@ -106,7 +108,7 @@ def detection_log_csv_row_audioseal(
     bit_str = "".join(str(int(b)) for b in bits) if bits else ""
     probs_np = message_probs[0].detach().cpu().float().numpy()
     probs_str = ";".join(f"{float(x):.6f}" for x in probs_np.tolist())
-    return [
+    row = [
         audio_file,
         algorithm,
         detected,
@@ -124,6 +126,9 @@ def detection_log_csv_row_audioseal(
         bit_str,
         probs_str,
     ]
+    if elapsed_ms is not None:
+        row.append(round(elapsed_ms, 2))
+    return row
 
 
 class AudiosealBackend(WatermarkBackend):
@@ -197,11 +202,13 @@ class AudiosealBackend(WatermarkBackend):
         sample_rate: int,
         audio_file: str,
         detect_log_path: str | None,
+        elapsed_ms: float | None = None,
     ) -> None:
         args = self.args
         det_thresh = args.detection_threshold
         msg_t = args.message_threshold
         frac_t = args.file_fraction_threshold
+        start = time.perf_counter()
 
         detect_frame_fraction, binary_message = self._detector.detect_watermark(
             wav_batched,
@@ -219,6 +226,7 @@ class AudiosealBackend(WatermarkBackend):
             show_raw=bool(args.debug),
         )
         if detect_log_path is not None:
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
             row = detection_log_csv_row_audioseal(
                 audio_file,
                 self.name,
@@ -230,6 +238,7 @@ class AudiosealBackend(WatermarkBackend):
                 binary_message=binary_message,
                 frame_logits=frame_logits,
                 message_probs=message_probs,
+                elapsed_ms=elapsed_ms,
             )
             with open(detect_log_path, "a", newline="", encoding="utf-8") as f:
                 csv.writer(f).writerow(row)
