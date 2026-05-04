@@ -169,8 +169,14 @@ class SilentCipherBackend(WatermarkBackend):
         assert self._message is not None
         y = wav_batch_to_mono_numpy(wav_batched)
         sr = int(sample_rate)
+        # Convert numpy to torch tensor on the same device as the model to avoid device mismatch
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        y_tensor = torch.from_numpy(y).to(device)
         # calc_sdr=False: library sdr() mixes np.mean with torch tensors and crashes on recent numpy/torch.
-        encoded, _sdr = self._model.encode_wav(y, sr, self._message, calc_sdr=False)
+        encoded, _sdr = self._model.encode_wav(y_tensor, sr, self._message, calc_sdr=False)
+        # Move encoded back to CPU before converting to numpy
+        if isinstance(encoded, torch.Tensor):
+            encoded = encoded.detach().cpu().numpy()
         watermarked = numpy_1d_to_batch_tensor(np.asarray(encoded, dtype=np.float32))
         metrics_ref = numpy_1d_to_batch_tensor(y)
         if torch.cuda.is_available():
@@ -239,8 +245,17 @@ class SilentCipherBackend(WatermarkBackend):
         assert self._message is not None
         y = wav_batch_to_mono_numpy(wav_batched)
         sr = int(sample_rate)
-        encoded, _sdr = self._model.encode_wav(y, sr, self._message, calc_sdr=False)
+
+        # Convert numpy to torch tensor on the same device as the model to avoid device mismatch
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        y_tensor = torch.from_numpy(y).to(device)
+        # calc_sdr=False: library sdr() mixes np.mean with torch tensors and crashes on recent numpy/torch.
+        encoded, _sdr = self._model.encode_wav(y_tensor, sr, self._message, calc_sdr=False)
+        # Move encoded back to CPU before converting to numpy
+        if isinstance(encoded, torch.Tensor):
+            encoded = encoded.detach().cpu().numpy()
         wav_wm = numpy_1d_to_batch_tensor(np.asarray(encoded, dtype=np.float32))
+
         if torch.cuda.is_available():
             wav_wm = wav_wm.cuda()
         return wav_wm, sr
