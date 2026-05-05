@@ -6,12 +6,12 @@ import csv
 from typing import ClassVar
 
 import numpy as np
-import soundfile as sf
 import time
 import torch
 import wavmark as wm
 from wavmark.utils import wm_add_util as wavmark_wm_add_util
 
+from audio_io import load_waveform_torch
 from bit_metrics import normalized_correlation
 from wavmark_io import (
     wavmark_decode_sliding_stats,
@@ -185,8 +185,7 @@ class WavmarkBackend(WatermarkBackend):
 
     def compute_ber_nc_after_save(self, wav_out_path: str) -> tuple[float, float] | None:
         assert self._payload is not None
-        data, sr_disk = sf.read(wav_out_path, dtype="float32", always_2d=True)
-        wav_disk = torch.from_numpy(data.T.copy())
+        wav_disk, sr_disk = load_waveform_torch(wav_out_path)
         payload_decoded_file, _, _ = wavmark_decode_watermark(
             self._wmmodel,
             wavmark_mono_16k_tensor(wav_disk.unsqueeze(0), sr_disk),

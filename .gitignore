@@ -23,6 +23,7 @@ plots/
 *.png
 *.csv
 metrics/
-
+whisper_results/
+dataset/
 .hf_token
 hf_token.txt

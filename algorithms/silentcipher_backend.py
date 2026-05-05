@@ -10,11 +10,11 @@ import csv
 from typing import ClassVar
 
 import numpy as np
-import soundfile as sf
 import silentcipher
 import time
 import torch
 
+from audio_io import load_waveform_torch
 from bit_metrics import normalized_correlation
 
 from .base import WatermarkBackend
@@ -202,8 +202,8 @@ class SilentCipherBackend(WatermarkBackend):
 
     def compute_ber_nc_after_save(self, wav_out_path: str) -> tuple[float, float] | None:
         assert self._message is not None
-        data, sr_disk = sf.read(wav_out_path, dtype="float32", always_2d=True)
-        y = np.mean(data, axis=1).astype(np.float32)
+        wav, sr_disk = load_waveform_torch(wav_out_path)
+        y = wav.mean(dim=0).detach().numpy().astype(np.float32)
         result = self._model.decode_wav(
             y,
             int(sr_disk),

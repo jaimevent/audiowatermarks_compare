@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Iterable
 
 import julius
+import librosa
 import numpy as np
 import soundfile as sf
 import torch
@@ -63,6 +64,16 @@ def _iter_dataset_examples(path: str) -> Iterable[tuple[str, str]]:
         if "wav_filename" in header_lower and "transcript" in header_lower:
             wav_idx = header_lower.index("wav_filename")
             transcript_idx = header_lower.index("transcript")
+        elif "path" in header_lower:
+            wav_idx = header_lower.index("path")
+            if "sentence" in header_lower:
+                transcript_idx = header_lower.index("sentence")
+            elif "transcript" in header_lower:
+                transcript_idx = header_lower.index("transcript")
+            else:
+                raise ValueError(
+                    f"Dataset {path} has a 'path' column but no 'sentence' or 'transcript' column."
+                )
         else:
             csv_file = Path(path)
             f.seek(0)
@@ -87,6 +98,16 @@ def _resolve_audio_path(dataset_root: str, audio_path: str) -> str:
     if os.path.isabs(audio_path):
         return audio_path
     return os.path.abspath(os.path.join(dataset_root, audio_path))
+
+
+def _whisper_language_for_transcribe(language: str | None) -> str | None:
+    """Map user/API language to Whisper's ``language`` (``None`` = auto-detect)."""
+    if language is None:
+        return None
+    code = language.strip().lower()
+    if code in ("auto", "none", ""):
+        return None
+    return code
 
 
 def _normalize_transcript(text: str) -> str:
@@ -136,15 +157,37 @@ def _resample_audio_to_rate(audio: np.ndarray, original_sr: int, target_sr: int)
     return resampled.astype(audio.dtype)
 
 
+def _load_audio_for_whisper(file_path: str, sample_rate: int) -> np.ndarray:
+    """Load mono float32 audio; MP3 via librosa (soundfile/libsndfile often lacks MP3)."""
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext == ".mp3":
+        audio, sr = librosa.load(file_path, sr=None, mono=True)
+        audio = np.asarray(audio, dtype=np.float32)
+    else:
+        audio, sr = sf.read(file_path, dtype="float32")
+        if audio.ndim > 1:
+            audio = audio.mean(axis=1)
+    if sr != sample_rate:
+        audio = _resample_audio_to_rate(audio, sr, sample_rate)
+    return audio
+
+
 def evaluate_with_whisper(
     dataset_root: str,
     results_csv: str,
     model_size: str = "base",
     sample_rate: int = 16000,
+    *,
+    language: str | None = "it",
 ) -> EvaluationMetrics:
-    """Evaluate WER/CER using Whisper on the test set."""
+    """Evaluate WER/CER using Whisper on the test set.
+
+    ``language`` is an ISO 639-1 code (e.g. ``it``, ``en``). Use ``None`` or the string
+    ``auto`` for automatic language detection.
+    """
     model = whisper.load_model(model_size)
     test_csv = _find_split_file(dataset_root, "test")
+    whisper_lang = _whisper_language_for_transcribe(language)
 
     os.makedirs(os.path.dirname(os.path.abspath(results_csv)), exist_ok=True)
     rows = []
@@ -159,13 +202,12 @@ def evaluate_with_whisper(
             absolute_wav = _resolve_audio_path(dataset_root, wav_path)
             if not os.path.isfile(absolute_wav):
                 raise FileNotFoundError(f"Audio file not found: {absolute_wav}")
-            audio, sr = sf.read(absolute_wav, dtype="float32")
-            if sr != sample_rate:
-                audio = _resample_audio_to_rate(audio, sr, sample_rate)
-            # Whisper expects mono audio
-            if audio.ndim > 1:
-                audio = audio.mean(axis=1)
-            result = model.transcribe(audio, language="en", fp16=torch.cuda.is_available())
+            audio = _load_audio_for_whisper(absolute_wav, sample_rate)
+            result = model.transcribe(
+                audio,
+                language=whisper_lang,
+                fp16=torch.cuda.is_available(),
+            )
             hypothesis = result["text"]
             wer = compute_wer(transcript, hypothesis)
             cer = compute_cer(transcript, hypothesis)
@@ -179,7 +221,6 @@ def evaluate_with_whisper(
     return EvaluationMetrics(
         model_name=f"whisper-{model_size}",
         dataset_root=dataset_root,
-        model_path="",  # Whisper is pre-trained, no specific path
         num_examples=count,
         avg_wer=avg_wer,
         avg_cer=avg_cer,
@@ -193,6 +234,8 @@ def evaluate_datasets(
     output_root: str,
     model_size: str = "base",
     sample_rate: int = 16000,
+    *,
+    language: str | None = "it",
 ) -> list[EvaluationMetrics]:
     """Evaluate WER/CER on raw and watermarked datasets using Whisper."""
     output_root = os.path.abspath(output_root)
@@ -209,6 +252,7 @@ def evaluate_datasets(
             results_csv=eval_csv,
             model_size=model_size,
             sample_rate=sample_rate,
+            language=language,
         )
         results.append(metrics)
 

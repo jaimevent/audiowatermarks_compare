@@ -35,6 +35,7 @@ from metrics_csv import (
 from pesq import pesq
 import librosa
 
+from audio_io import load_waveform_torch, save_watermarked_to_path
 from attacks import attack_eval_specs
 from watermark_plots import (
     attack_row_values_to_binary,
@@ -46,56 +47,18 @@ from watermark_plots import (
 )
 
 
-def convert_audio_to_wav(src_audio: str, dst_wav: str) -> None:
-    """Decode FLAC or MP3 into a WAV container (float32 samples)."""
-    extension = os.path.splitext(src_audio)[1].lower()
-    if extension == ".flac":
-        data, samplerate = sf.read(src_audio, dtype="float32", always_2d=True)
-    elif extension == ".mp3":
-        data, samplerate = librosa.load(src_audio, sr=None, mono=False)
-        if data.ndim == 1:
-            data = data[np.newaxis, :]
-        data = np.ascontiguousarray(data.T, dtype=np.float32)
-    else:
-        raise ValueError(f"Unsupported audio format for conversion: {src_audio}")
-
-    sf.write(dst_wav, data, samplerate, format="WAV", subtype="FLOAT")
-
-
-def _load_from_wav_file(wav_path: str) -> tuple[torch.Tensor, int]:
-    # soundfile avoids torchaudio 2.10+ routing through torchcodec for simple file decode.
-    data, sample_rate = sf.read(wav_path, dtype="float32", always_2d=True)
-    wav = torch.from_numpy(data.T.copy())
-    return wav, sample_rate
-
-
 def load_audio(file_path: str) -> tuple[torch.Tensor, int]:
-    """Load audio for the model. WAV is read directly; FLAC/MP3 is converted to WAV then loaded."""
-    if file_path.lower().endswith(('.flac', '.mp3')):
-        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-        tmp_path = tmp.name
-        tmp.close()
-        try:
-            convert_audio_to_wav(file_path, tmp_path)
-            return _load_from_wav_file(tmp_path)
-        finally:
-            os.unlink(tmp_path)
-    return _load_from_wav_file(file_path)
+    """Load audio for the model as ``(channels, samples)``. Supports WAV/FLAC/MP3."""
+    return load_waveform_torch(file_path)
+
 
 def save_watermarked_wav(
     watermarked_audio: torch.Tensor,
     sample_rate: int,
     out_path: str,
 ) -> None:
-    """Write watermarked audio as WAV (float32). Expects shape (batch, channels, samples)."""
-    if watermarked_audio.dim() != 3:
-        raise ValueError(
-            f"Expected watermarked tensor rank 3 (batch, channels, samples); got {watermarked_audio.dim()}"
-        )
-    # (channels, samples) -> (samples, channels) for soundfile
-    data = watermarked_audio[0].detach().cpu().numpy().T.astype(np.float32, copy=False)
-    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
-    sf.write(out_path, data, sample_rate, format="WAV", subtype="FLOAT")
+    """Write watermarked audio; extension selects container (typically ``.wav``)."""
+    save_watermarked_to_path(watermarked_audio, sample_rate, out_path)
 
 
 def watermarking_snr_db(
@@ -384,7 +347,16 @@ def _parse_args() -> argparse.Namespace:
         "--output-watermarked",
         default=None,
         metavar="DIR",
-        help="Directory for watermarked WAV files (default: <input>/watermarked_wav).",
+        help="Directory for watermarked audio files (default: <input>/<algorithm>_watermarked_wav).",
+    )
+    p_watermark.add_argument(
+        "--output-format",
+        choices=["wav", "match-input"],
+        default="wav",
+        help=(
+            "Container for embedding outputs: always .wav (default), or match each source "
+            "extension (.wav/.flac/.mp3). MP3 needs FFmpeg (TorchAudio backend or ffmpeg in PATH)."
+        ),
     )
 
     p_detect = subparsers.add_parser(
@@ -546,6 +518,15 @@ def _parse_args() -> argparse.Namespace:
         metavar="SR",
         help="Sample rate used for evaluation (default: 16000).",
     )
+    p_train.add_argument(
+        "--language",
+        default="it",
+        metavar="CODE",
+        help=(
+            "Whisper transcription language as ISO 639-1 (e.g. it, en). "
+            "Use 'auto' for automatic detection (default: it)."
+        ),
+    )
 
     return parser.parse_args()
 
@@ -572,9 +553,16 @@ def main() -> None:
             output_root=output_root,
             model_size=args.model_size,
             sample_rate=args.sample_rate,
+            language=args.language,
         )
 
+        lang_note = (
+            "auto-detect"
+            if str(args.language).strip().lower() in ("auto", "none", "")
+            else args.language.strip().lower()
+        )
         print("\nWhisper evaluation complete.")
+        print(f"Whisper language: {lang_note}")
         print(f"Results directory: {output_root}")
         for metrics in results:
             print(
@@ -695,12 +683,20 @@ def main() -> None:
                 if pre is not None:
                     ber_val, nc_val = pre
 
-                stem, _ = os.path.splitext(audio_file)
-                wav_out_path = os.path.join(
-                    watermarked_wav_dir, f"{stem}_{algorithm}_watermarked.wav"
-                )
-                save_watermarked_wav(watermarked_audio, metrics_sr, wav_out_path)
-                print(f"  Saved watermarked WAV: {stem}_{algorithm}_watermarked.wav")
+                stem, in_ext = os.path.splitext(audio_file)
+                in_ext_l = in_ext.lower()
+                out_ext = ".wav"
+                if args.output_format == "match-input":
+                    if in_ext_l not in (".wav", ".flac", ".mp3"):
+                        raise SystemExit(
+                            f"Unsupported input extension for --output-format match-input: {audio_file}"
+                        )
+                    out_ext = in_ext_l
+                #wm_filename = f"{stem}_{algorithm}_watermarked{out_ext}"
+                wm_filename = f"{stem}{out_ext}"
+                wav_out_path = os.path.join(watermarked_wav_dir, wm_filename)
+                save_watermarked_to_path(watermarked_audio, metrics_sr, wav_out_path)
+                print(f"  Saved watermarked file: {wm_filename}")
 
                 post = backend.compute_ber_nc_after_save(wav_out_path)
                 if post is not None:
