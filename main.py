@@ -23,6 +23,7 @@ import numpy as np
 import soundfile as sf
 
 from algorithms import ALGORITHM_IDS, ALGORITHM_REGISTRY, get_backend
+from whisper_evaluation import evaluate_datasets
 from metrics_csv import (
     append_attack_metrics_row,
     append_watermark_metrics_row,
@@ -45,9 +46,19 @@ from watermark_plots import (
 )
 
 
-def convert_flac_to_wav(src_flac: str, dst_wav: str) -> None:
-    """Decode FLAC and write a WAV container (float32 samples). libsndfile handles FLAC."""
-    data, samplerate = sf.read(src_flac, dtype="float32", always_2d=True)
+def convert_audio_to_wav(src_audio: str, dst_wav: str) -> None:
+    """Decode FLAC or MP3 into a WAV container (float32 samples)."""
+    extension = os.path.splitext(src_audio)[1].lower()
+    if extension == ".flac":
+        data, samplerate = sf.read(src_audio, dtype="float32", always_2d=True)
+    elif extension == ".mp3":
+        data, samplerate = librosa.load(src_audio, sr=None, mono=False)
+        if data.ndim == 1:
+            data = data[np.newaxis, :]
+        data = np.ascontiguousarray(data.T, dtype=np.float32)
+    else:
+        raise ValueError(f"Unsupported audio format for conversion: {src_audio}")
+
     sf.write(dst_wav, data, samplerate, format="WAV", subtype="FLOAT")
 
 
@@ -59,13 +70,13 @@ def _load_from_wav_file(wav_path: str) -> tuple[torch.Tensor, int]:
 
 
 def load_audio(file_path: str) -> tuple[torch.Tensor, int]:
-    """Load audio for the model. WAV is read directly; FLAC is converted to WAV then loaded."""
-    if file_path.lower().endswith(".flac"):
+    """Load audio for the model. WAV is read directly; FLAC/MP3 is converted to WAV then loaded."""
+    if file_path.lower().endswith(('.flac', '.mp3')):
         tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
         tmp_path = tmp.name
         tmp.close()
         try:
-            convert_flac_to_wav(file_path, tmp_path)
+            convert_audio_to_wav(file_path, tmp_path)
             return _load_from_wav_file(tmp_path)
         finally:
             os.unlink(tmp_path)
@@ -310,7 +321,7 @@ def _parse_args() -> argparse.Namespace:
         help="Action to run.",
     )
 
-    input_help = "Directory containing .wav and/or .flac files (non-recursive)."
+    input_help = "Directory containing .wav, .flac, and/or .mp3 files (non-recursive)."
 
     def attach_algorithm_arguments(p: argparse.ArgumentParser) -> None:
         p.add_argument(
@@ -499,11 +510,79 @@ def _parse_args() -> argparse.Namespace:
     )
     attach_algorithm_arguments(p_attack)
 
+    p_train = subparsers.add_parser(
+        "evaluate",
+        help="Evaluate WER/CER using OpenAI Whisper on raw and watermarked datasets.",
+    )
+    p_train.add_argument(
+        "--raw-dataset",
+        required=True,
+        metavar="DIR",
+        help="Directory containing the raw dataset CSV/TSV files.",
+    )
+    p_train.add_argument(
+        "--watermarked-dataset",
+        required=True,
+        metavar="DIR",
+        help="Directory containing the watermarked dataset CSV/TSV files.",
+    )
+    p_train.add_argument(
+        "--output-root",
+        default="whisper_results",
+        metavar="DIR",
+        help="Directory to store evaluation CSVs and summary results.",
+    )
+    p_train.add_argument(
+        "--model-size",
+        default="base",
+        choices=["tiny", "base", "small", "medium", "large"],
+        metavar="SIZE",
+        help="Whisper model size (default: base).",
+    )
+    p_train.add_argument(
+        "--sample-rate",
+        type=int,
+        default=16000,
+        metavar="SR",
+        help="Sample rate used for evaluation (default: 16000).",
+    )
+
     return parser.parse_args()
 
 def main() -> None:
     _configure_hf_token_from_repo_file()
     args = _parse_args()
+
+    if args.command == "evaluate":
+        raw_dataset_root = os.path.abspath(args.raw_dataset)
+        watermarked_dataset_root = os.path.abspath(args.watermarked_dataset)
+        output_root = os.path.abspath(args.output_root)
+
+        for dataset_path, label in (
+            (raw_dataset_root, "raw dataset"),
+            (watermarked_dataset_root, "watermarked dataset"),
+        ):
+            if not os.path.isdir(dataset_path):
+                raise SystemExit(f"Not a directory: {dataset_path}")
+
+        os.makedirs(output_root, exist_ok=True)
+        results = evaluate_datasets(
+            raw_dataset_root=raw_dataset_root,
+            watermarked_dataset_root=watermarked_dataset_root,
+            output_root=output_root,
+            model_size=args.model_size,
+            sample_rate=args.sample_rate,
+        )
+
+        print("\nWhisper evaluation complete.")
+        print(f"Results directory: {output_root}")
+        for metrics in results:
+            print(
+                f"- {metrics.model_name}: dataset={metrics.dataset_root}, "
+                f"examples={metrics.num_examples}, wer={metrics.avg_wer:.4f}, cer={metrics.avg_cer:.4f}, "
+                f"eval_csv={metrics.results_csv}"
+            )
+        return
 
     audio_folder = os.path.abspath(args.input)
     if not os.path.isdir(audio_folder):
@@ -571,7 +650,7 @@ def main() -> None:
     audio_files = [
         f
         for f in os.listdir(audio_folder)
-        if f.lower().endswith(".wav") or f.lower().endswith(".flac")
+        if f.lower().endswith(('.wav', '.flac', '.mp3'))
     ]
 
     for algorithm in algorithms:

@@ -158,7 +158,7 @@ class SilentCipherBackend(WatermarkBackend):
         self._model = silentcipher.get_model(model_type=model_type, device=device)
         self._message: list[int] | None = None
         # Attack suite stresses crops/time edits; library recommends phase_shift_decoding=True there.
-        self._phase_shift = True if command == "attack" and device == "cuda" else bool(
+        self._phase_shift = True if False and command == "attack" and device == "cuda" else bool(
             getattr(args, "silentcipher_phase_shift", False)
         )
         if command in ("watermark", "attack"):

@@ -1,14 +1,14 @@
-# main.py: torch, torchaudio, audioseal.
-# audioseal also installs numpy, omegaconf, and (on Python >= 3.10) einops.
-#
 # torchcodec must match torch (see https://github.com/pytorch/torchcodec#installing-torchcodec):
 #   torchcodec 0.11.x  ->  torch 2.11.x  (Python >=3.10, <=3.14)
 #
 # CPU torchcodec wheels often need:
 #   pip install torchcodec --index-url=https://download.pytorch.org/whl/cpu
 # (match --index-url to the same CUDA/CPU channel you used for torch/torchaudio.)
-torch>=2.11,<2.12
-torchaudio>=2.11,<2.12
+#torch>=2.11,<2.12
+torch==2.6.0
+torchvision==0.21.0
+torchaudio==2.6.0
+#torchaudio>=2.11,<2.12
 torchcodec>=0.11,<0.12
 audioseal>=0.1.0
 # Audio I/O in main.py via libsndfile: WAV and FLAC decode; avoids torchcodec for load.
@@ -21,6 +21,7 @@ julius>=0.2
 
 wavmark
 
+openai-whisper
 # SilentCipher / PyTorch: PyPI silentcipher (= Sony release) declares torch<=2.0.0, so pip
 # cannot resolve it together with torch 2.11 above. SesameAILabs' fork bumps deps to
 # torch>=2.4 and torchaudio>=2.4 (same codebase, installable beside AudioSeal/WavMark).

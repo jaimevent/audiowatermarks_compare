@@ -1,0 +1,238 @@
+"""Whisper evaluation helpers for audio watermarking impact assessment.
+
+This module uses OpenAI Whisper for evaluating WER/CER on raw and watermarked
+audio datasets. It expects dataset roots to contain CSV/TSV split files named
+`test.csv|.tsv` with columns for audio paths and transcripts.
+"""
+
+from __future__ import annotations
+
+import csv
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable
+
+import julius
+import numpy as np
+import soundfile as sf
+import torch
+import whisper
+
+
+@dataclass
+class EvaluationMetrics:
+    model_name: str
+    dataset_root: str
+    num_examples: int
+    avg_wer: float
+    avg_cer: float
+    results_csv: str
+
+
+def _find_split_file(dataset_root: str, split: str) -> str:
+    for ext in (".csv", ".tsv"):
+        path = os.path.join(dataset_root, f"{split}{ext}")
+        if os.path.isfile(path):
+            return path
+    raise FileNotFoundError(
+        f"Could not find {split} split file under {dataset_root}. "
+        "Expected test.csv/tsv."
+    )
+
+
+def _sniff_csv_delimiter(path: str) -> str:
+    with open(path, "r", encoding="utf-8", newline="") as f:
+        sample = f.read(2048)
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",\t")
+        return dialect.delimiter
+    except csv.Error:
+        return ","
+
+
+def _iter_dataset_examples(path: str) -> Iterable[tuple[str, str]]:
+    delimiter = _sniff_csv_delimiter(path)
+    with open(path, "r", encoding="utf-8", newline="") as f:
+        reader = csv.reader(f, delimiter=delimiter)
+        header = next(reader, None)
+        if header is None:
+            return
+
+        header_lower = [column.strip().lower() for column in header]
+        if "wav_filename" in header_lower and "transcript" in header_lower:
+            wav_idx = header_lower.index("wav_filename")
+            transcript_idx = header_lower.index("transcript")
+        else:
+            csv_file = Path(path)
+            f.seek(0)
+            reader = csv.reader(f, delimiter=delimiter)
+            first_row = next(reader, None)
+            if first_row is None:
+                return
+            if len(first_row) >= 3 and first_row[1].strip().isdigit():
+                wav_idx, transcript_idx = 0, 2
+            else:
+                wav_idx, transcript_idx = 0, 1
+            yield from ((row[wav_idx].strip(), row[transcript_idx].strip()) for row in reader if row)
+            return
+
+        for row in reader:
+            if not row or row[0].strip().startswith("#"):
+                continue
+            yield row[wav_idx].strip(), row[transcript_idx].strip()
+
+
+def _resolve_audio_path(dataset_root: str, audio_path: str) -> str:
+    if os.path.isabs(audio_path):
+        return audio_path
+    return os.path.abspath(os.path.join(dataset_root, audio_path))
+
+
+def _normalize_transcript(text: str) -> str:
+    return " ".join(text.strip().lower().split())
+
+
+def compute_wer(reference: str, hypothesis: str) -> float:
+    ref_words = _normalize_transcript(reference).split()
+    hyp_words = _normalize_transcript(hypothesis).split()
+    if not ref_words:
+        return float("inf") if hyp_words else 0.0
+    dist = _compute_edit_distance(ref_words, hyp_words)
+    return dist / len(ref_words)
+
+
+def compute_cer(reference: str, hypothesis: str) -> float:
+    ref_chars = list(_normalize_transcript(reference).replace(" ", ""))
+    hyp_chars = list(_normalize_transcript(hypothesis).replace(" ", ""))
+    if not ref_chars:
+        return float("inf") if hyp_chars else 0.0
+    dist = _compute_edit_distance(ref_chars, hyp_chars)
+    return dist / len(ref_chars)
+
+
+def _compute_edit_distance(ref_tokens: list[str], hyp_tokens: list[str]) -> int:
+    dp = [[0] * (len(hyp_tokens) + 1) for _ in range(len(ref_tokens) + 1)]
+    for i in range(1, len(ref_tokens) + 1):
+        dp[i][0] = i
+    for j in range(1, len(hyp_tokens) + 1):
+        dp[0][j] = j
+    for i in range(1, len(ref_tokens) + 1):
+        for j in range(1, len(hyp_tokens) + 1):
+            cost = 0 if ref_tokens[i - 1] == hyp_tokens[j - 1] else 1
+            dp[i][j] = min(
+                dp[i - 1][j] + 1,
+                dp[i][j - 1] + 1,
+                dp[i - 1][j - 1] + cost,
+            )
+    return dp[-1][-1]
+
+
+def _resample_audio_to_rate(audio: np.ndarray, original_sr: int, target_sr: int) -> np.ndarray:
+    if original_sr == target_sr:
+        return audio
+    audio_tensor = torch.from_numpy(audio.astype(np.float32)).unsqueeze(0)
+    resampled = julius.resample_frac(audio_tensor, original_sr, target_sr).squeeze(0).numpy()
+    return resampled.astype(audio.dtype)
+
+
+def evaluate_with_whisper(
+    dataset_root: str,
+    results_csv: str,
+    model_size: str = "base",
+    sample_rate: int = 16000,
+) -> EvaluationMetrics:
+    """Evaluate WER/CER using Whisper on the test set."""
+    model = whisper.load_model(model_size)
+    test_csv = _find_split_file(dataset_root, "test")
+
+    os.makedirs(os.path.dirname(os.path.abspath(results_csv)), exist_ok=True)
+    rows = []
+    total_wer = 0.0
+    total_cer = 0.0
+    count = 0
+
+    with open(results_csv, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["audio_file", "reference", "hypothesis", "wer", "cer"])
+        for wav_path, transcript in _iter_dataset_examples(test_csv):
+            absolute_wav = _resolve_audio_path(dataset_root, wav_path)
+            if not os.path.isfile(absolute_wav):
+                raise FileNotFoundError(f"Audio file not found: {absolute_wav}")
+            audio, sr = sf.read(absolute_wav, dtype="float32")
+            if sr != sample_rate:
+                audio = _resample_audio_to_rate(audio, sr, sample_rate)
+            # Whisper expects mono audio
+            if audio.ndim > 1:
+                audio = audio.mean(axis=1)
+            result = model.transcribe(audio, language="en", fp16=torch.cuda.is_available())
+            hypothesis = result["text"]
+            wer = compute_wer(transcript, hypothesis)
+            cer = compute_cer(transcript, hypothesis)
+            total_wer += wer
+            total_cer += cer
+            count += 1
+            writer.writerow([absolute_wav, transcript, hypothesis, f"{wer:.6f}", f"{cer:.6f}"])
+
+    avg_wer = total_wer / count if count else float("nan")
+    avg_cer = total_cer / count if count else float("nan")
+    return EvaluationMetrics(
+        model_name=f"whisper-{model_size}",
+        dataset_root=dataset_root,
+        model_path="",  # Whisper is pre-trained, no specific path
+        num_examples=count,
+        avg_wer=avg_wer,
+        avg_cer=avg_cer,
+        results_csv=os.path.abspath(results_csv),
+    )
+
+
+def evaluate_datasets(
+    raw_dataset_root: str,
+    watermarked_dataset_root: str,
+    output_root: str,
+    model_size: str = "base",
+    sample_rate: int = 16000,
+) -> list[EvaluationMetrics]:
+    """Evaluate WER/CER on raw and watermarked datasets using Whisper."""
+    output_root = os.path.abspath(output_root)
+    os.makedirs(output_root, exist_ok=True)
+    results: list[EvaluationMetrics] = []
+
+    for label, dataset_root in (
+        ("raw", raw_dataset_root),
+        ("watermarked", watermarked_dataset_root),
+    ):
+        eval_csv = os.path.join(output_root, f"{label}_whisper_evaluation.csv")
+        metrics = evaluate_with_whisper(
+            dataset_root=dataset_root,
+            results_csv=eval_csv,
+            model_size=model_size,
+            sample_rate=sample_rate,
+        )
+        results.append(metrics)
+
+    summary_csv = os.path.join(output_root, "whisper_comparison_summary.csv")
+    with open(summary_csv, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "model_label",
+            "dataset_root",
+            "results_csv",
+            "num_examples",
+            "avg_wer",
+            "avg_cer",
+        ])
+        for metrics in results:
+            writer.writerow(
+                [
+                    metrics.model_name,
+                    metrics.dataset_root,
+                    metrics.results_csv,
+                    metrics.num_examples,
+                    f"{metrics.avg_wer:.6f}",
+                    f"{metrics.avg_cer:.6f}",
+                ]
+            )
+
+    return results

@@ -1,17 +1,22 @@
 # Audiowatermarks Compare
 
-Small Python utility to run **Meta [AudioSeal](https://github.com/facebookresearch/audioseal)** on a folder of audio files: embed a watermark with the generator, measure how loud the residual is versus the original, save the watermarked waveform, optionally export comparison plots, and score the result with the detector. It is a practical starting point for comparing or benchmarking audio watermarking setups.
+Python utility to benchmark audio watermarking algorithms on folders of audio files. Supports embedding watermarks, detection, robustness testing against attacks, and evaluating impact on ASR models like DeepSpeech.
+
+Currently supported algorithms:
+- **Meta AudioSeal** (facebookresearch/audioseal)
+- **Sony SilentCipher** (SesameAILabs fork for PyTorch 2.x compatibility)
+- **WavMark** (watermarking via adversarial examples)
 
 ## Requirements
 
-- **Python** 3.10 or newer (aligned with PyTorch 2.11 and AudioSeal).
-- **PyTorch**, **torchaudio**, **torchcodec**, **audioseal**, **soundfile**, and **matplotlib** (see `requirements.txt`).
+- **Python** 3.10 or newer.
+- **PyTorch**, **torchaudio**, **torchcodec**, **audioseal**, **soundfile**, **matplotlib**, and other dependencies (see `requirements.txt`).
 
 Install PyTorch from the [official install page](https://pytorch.org/get-started/locally/) if you need a specific CUDA build; then install the rest:
 
 ```bash
 python -m venv .venv
-.venv\Scripts\activate
+.venv\Scripts\activate  # or source .venv/bin/activate on Unix
 pip install -r requirements.txt
 ```
 
@@ -21,70 +26,143 @@ On Windows, if you use the CPU wheel index for `torchcodec`, match it to your Py
 pip install torchcodec --index-url=https://download.pytorch.org/whl/cpu
 ```
 
-## Usage
+### DeepSpeech (for `evaluate` command)
 
-Point the script at a directory that contains **`.wav`** and/or **`.flac`** files. Only the **top level** of that folder is scanned (no subfolders).
+The `evaluate` command requires OpenAI Whisper for evaluating WER/CER on raw and watermarked datasets.
+
+Whisper is available on PyPI:
 
 ```bash
-python main.py -i path\to\audio_folder
+pip install openai-whisper
 ```
 
-Short form:
+Whisper will automatically download the model weights on first use.
 
+## Usage
+
+Point the script at a directory containing **`.wav`**, **`.flac`**, or **`.mp3`** files. Only the **top level** of that folder is scanned (no subfolders).
+
+### Commands
+
+- **`watermark`**: Embed watermarks and measure quality metrics.
+- **`detect`**: Run watermark detection on audio files.
+- **`attack`**: Embed watermarks, apply attacks, then detect (robustness testing).
+- **`evaluate`**: Evaluate WER/CER using OpenAI Whisper on raw and watermarked datasets.
+
+### Examples
+
+Embed watermarks with default AudioSeal:
 ```bash
-python main.py --input .\dataset\lld\
+python main.py watermark -i path/to/audio_folder
+```
+
+Detect watermarks:
+```bash
+python main.py detect -i path/to/audio_folder
+```
+
+Test robustness against attacks:
+```bash
+python main.py attack -i path/to/audio_folder
+```
+
+Train and evaluate DeepSpeech models:
+```bash
+python main.py evaluate --raw-dataset /path/to/raw/csv --watermarked-dataset /path/to/watermarked/csv
 ```
 
 ### Command-line options
 
+#### Global options
 | Option | Description |
 |--------|-------------|
-| `-i`, `--input` | **Required.** Folder containing `.wav` / `.flac`. |
-| `-o`, `--output-plot` | Directory for PNG plots (default: `<input>/audioseal_plots`). |
-| `--no-plots` | Skip waveform and spectrogram comparison figures. |
+| `-i`, `--input` | **Required for watermark/detect/attack.** Folder containing `.wav`/`.flac`/`.mp3`. |
+| `--algorithm` | Algorithm to use (default: `audioseal`). Choices: `audioseal`, `silentcipher`, `wavmark`. |
+| `--all-algorithms` | Run all supported algorithms. |
+
+#### Watermark command
+| Option | Description |
+|--------|-------------|
+| `-o`, `--output-plot` | Directory for PNG plots (default: `<input>/plots`). |
+| `--no-plots` | Skip comparison plots. |
 | `--plot-dpi` | PNG resolution (default: `150`). |
-| `--output-watermarked` | Directory for watermarked WAV files (default: `<input>/watermarked_wav`). |
-| `--generator` | AudioSeal generator card (default: `audioseal_wm_16bits`). |
-| `--detector` | AudioSeal detector card (default: `audioseal_detector_16bits`). |
-| `--debug` | Verbose detector logging in the console (default: `True`). |
+| `--output-watermarked` | Directory for watermarked WAV files (default: `<input>/<algorithm>_watermarked_wav`). |
+| `--output-metrics` | Base name for metrics CSV (default: `<algorithm>_watermark_metrics.csv`). |
 
-Stopping with **Ctrl+C** exits cleanly: a short message on stderr, matplotlib figures closed, CUDA cache cleared when applicable, and exit code **130** (no traceback).
+#### Detect command
+| Option | Description |
+|--------|-------------|
+| `--detection-threshold` | Frame-level P(watermark) threshold (default: `0.5`). |
+| `--message-threshold` | Message bit threshold (default: `0.5`). |
+| `--file-fraction-threshold` | Fraction of frames above threshold to count as detected (default: `0.5`). |
+| `--output-detect-log` | Base name for detection log CSV. |
 
-## What the script does per file
+#### Attack command
+Includes all watermark and detect options, plus:
+| Option | Description |
+|--------|-------------|
+| `--attack-seed` | RNG seed for stochastic attacks (default: `42`). |
+| `--save-attacked` | Directory to save attacked watermarked WAVs. |
+| `--output-attack-metrics` | Base name for attack metrics CSV. |
+| `--output-attack-plot` | Directory for attack robustness plots. |
+| `--no-attack-plots` | Skip attack summary plots. |
 
-1. **Load** the clip (WAV directly; FLAC via a temporary WAV using the same pipeline).
-2. **Embed** the watermark and form `watermarked = original + watermark`.
-3. **Print embedding SNR (dB)** — signal power of the original versus mean-square power of the residual `watermarked − original` (higher dB means a quieter watermark relative to the host audio).
-4. **Save** `<stem>_watermarked.wav` under the watermarked output directory (float32 WAV).
-5. **Run** the detector on the watermarked tensor (high- and low-level API when debug logging is enabled).
-6. **Optionally save** a four-panel PNG (original vs watermarked waveform and spectrogram), matching the layout used in the upstream AudioSeal notebook examples.
+#### Evaluate command
+| Option | Description |
+|--------|-------------|
+| `--raw-dataset` | **Required.** Directory with raw dataset CSV/TSV files. |
+| `--watermarked-dataset` | **Required.** Directory with watermarked dataset CSV/TSV files. |
+| `--output-root` | Output directory for results (default: `whisper_results`). |
+| `--model-size` | Whisper model size: tiny/base/small/medium/large (default: `base`). |
+| `--sample-rate` | Sample rate for evaluation (default: `16000`). |
 
-If a **CUDA** device is available, the generator and tensors used in the loop are moved to the GPU for inference.
+## What the script does
+
+### Watermark embedding
+1. Load audio (WAV directly; FLAC/MP3 converted to temporary WAV).
+2. Embed watermark and compute `watermarked = original + watermark`.
+3. Print SNR (dB) — original power vs residual power.
+4. Save watermarked WAV.
+5. Compute BER/NC metrics.
+6. Optionally save comparison plots (waveforms and spectrograms).
+
+### Detection
+- Run detector on audio files.
+- Log detection results to CSV.
+
+### Attacks
+- Embed watermarks.
+- Apply various audio attacks (resampling, compression, noise, etc.).
+- Detect watermarks on attacked audio.
+- Generate robustness heatmaps and bar charts.
+
+### Whisper evaluation
+- Evaluate WER/CER on the test sets of raw and watermarked datasets using pre-trained Whisper models.
+- Output comparison summary.
 
 ## Behaviour notes
 
 ### Audio loading
+- **WAV**, **FLAC**, and **MP3** supported via PySoundFile and librosa.
+- Non-WAV formats converted to temporary WAV before processing.
 
-- **WAV** and **FLAC** are supported. Loading uses **PySoundFile** (`soundfile`) backed by **libsndfile**; no separate media server is required for these formats in `main.py`.
-- FLAC files are decoded and passed through a **temporary WAV** on disk before the same read path as WAV.
+### Tensor shapes
+- Algorithms expect `(batch, channels, samples)`.
+- Mono audio converted to stereo if needed.
 
-### Tensor shape
+### PyTorch compilation
+- `TORCHDYNAMO_DISABLE=1` set to avoid MSVC requirements on Windows.
 
-AudioSeal expects waveforms shaped **`(batch, channels, samples)`**. The script adds the batch axis with `unsqueeze(0)` after load.
-
-### `torch.compile` on Windows
-
-AudioSeal’s encoder can be wrapped with **`torch.compile`**. The Inductor backend on CPU Windows looks for **MSVC (`cl.exe`)**; if it is missing, compilation fails. This repository sets **`TORCHDYNAMO_DISABLE=1`** and **`torch._dynamo.config.disable = True`** in `main.py` before heavy imports so runs work without Visual Studio Build Tools. To try compiled mode again after installing the **Desktop development with C++** workload, remove or adjust those lines.
-
-### Sample rate
-
-AudioSeal is documented to work well at **16 kHz** and **24 kHz**, and for **48 kHz** speech in many cases. Resample upstream if you need a strict sample rate for your experiments.
+### Sample rates
+- Algorithms work best at 16 kHz; resample if needed.
 
 ## References
 
 - AudioSeal: [facebookresearch/audioseal](https://github.com/facebookresearch/audioseal)
-- Paper: [Proactive Detection of Voice Cloning with Localized Watermarking](https://arxiv.org/abs/2401.17264)
+- SilentCipher: [SesameAILabs/silentcipher](https://github.com/SesameAILabs/silentcipher)
+- WavMark: [watermarking via adversarial examples](https://github.com/watermarking)
+- Whisper: [openai/whisper](https://github.com/openai/whisper)
 
 ## License
 
-This repository’s scripts are for research use; **AudioSeal** and model weights follow the licenses described in the upstream project.
+Scripts for research use; algorithms follow their respective upstream licenses.

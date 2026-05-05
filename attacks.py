@@ -311,6 +311,24 @@ class AudioEffects:
                 
         return audio_effect_return(tensor=shush_tensor, mask=mask)
 
+    @staticmethod
+    def ttsattack(
+        tensor: torch.Tensor,
+        sample_rate: int = 16000,
+        mask: tp.Optional[torch.Tensor] = None,
+    ) -> tp.Union[tp.Tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
+        """
+        A simple TTS attack that generates a TTS version of the input audio and mixes it with the original.
+
+        Parameters:
+        - tensor (torch.Tensor): Input audio tensor. Assumes tensor shape is (batch_size, channels, time).
+        - sample_rate (int): Sample rate of the audio signal.
+
+        Returns:
+        - torch.Tensor: Attacked audio tensor.
+        """
+        # Placeholder for TTS attack implementation
+        pass
 
 def attack_eval_specs(
     sample_rate: int,
