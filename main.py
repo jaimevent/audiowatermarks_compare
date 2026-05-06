@@ -675,8 +675,12 @@ def main() -> None:
                 snr_db = watermarking_snr_db(metrics_ref, watermarked_audio)
                 print(f"  SNR: {snr_db:.2f} dB")
 
-                pesq_val = pesq_score(metrics_ref, watermarked_audio, metrics_sr)
-                print(f"  PESQ: {pesq_val:.2f}")
+                try:
+                    pesq_val = pesq_score(metrics_ref, watermarked_audio, metrics_sr)
+                    print(f"  PESQ: {pesq_val:.2f}")
+                except Exception as e:
+                    print(f"  PESQ: N/A (failed: {e})")
+                    pesq_val = float('nan')
 
                 ber_val, nc_val = 0.0, 0.0
                 pre = backend.compute_ber_nc_before_save(wav, watermarked_audio, sample_rate)
