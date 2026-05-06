@@ -1,8 +1,9 @@
 # Audiowatermarks Compare
 
-Python utility to benchmark audio watermarking algorithms on folders of audio files. Supports embedding watermarks, detection, robustness testing against attacks, and evaluating impact on ASR models like DeepSpeech.
+Python utility to benchmark audio watermarking algorithms on folders of audio files. Supports embedding watermarks, detection, robustness testing against attacks, and evaluating impact on automatic speech recognition using **OpenAI Whisper** (WER, CER, and real-time factor).
 
 Currently supported algorithms:
+
 - **Meta AudioSeal** (facebookresearch/audioseal)
 - **Sony SilentCipher** (SesameAILabs fork for PyTorch 2.x compatibility)
 - **WavMark** (watermarking via adversarial examples)
@@ -26,135 +27,239 @@ On Windows, if you use the CPU wheel index for `torchcodec`, match it to your Py
 pip install torchcodec --index-url=https://download.pytorch.org/whl/cpu
 ```
 
-### DeepSpeech (for `evaluate` command)
+### OpenAI Whisper (for `evaluate` command)
 
-The `evaluate` command requires OpenAI Whisper for evaluating WER/CER on raw and watermarked datasets.
-
-Whisper is available on PyPI:
+The `evaluate` command uses OpenAI Whisper for WER, CER, and **RTF** (real-time factor) on raw and watermarked datasets.
 
 ```bash
 pip install openai-whisper
 ```
 
-Whisper will automatically download the model weights on first use.
+Whisper downloads model weights on first use.
 
-## Usage
+## Invoking the program
 
-Point the script at a directory containing **`.wav`**, **`.flac`**, or **`.mp3`** files. Only the **top level** of that folder is scanned (no subfolders).
+General form:
+
+```bash
+python main.py [GLOBAL_OPTIONS] COMMAND [COMMAND_OPTIONS]
+```
+
+**Global options** (parsed before the subcommand) configure backends used by **`watermark`**, **`detect`**, and **`attack`**. They are accepted for **`evaluate`** as well but have no effect there (Whisper evaluation does not use the watermark backends).
+
+| Option | Description |
+|--------|-------------|
+| `--generator NAME` | AudioSeal generator card name (default: `audioseal_wm_16bits`). |
+| `--detector NAME` | AudioSeal detector card name (default: `audioseal_detector_16bits`). |
+| `--debug` | Show debug information (default: enabled). |
+| `--silentcipher-model {44.1k,16k}` | SilentCipher checkpoint family (default: `44.1k`). Ignored unless `--algorithm silentcipher`. |
+| `--silentcipher-phase-shift` | Use phase-shift decoding for SilentCipher on watermark/detect (`decode_wav(..., phase_shift_decoding=True)`); slower, more robust to crops. Ignored unless algorithm is SilentCipher. |
 
 ### Commands
 
-- **`watermark`**: Embed watermarks and measure quality metrics.
-- **`detect`**: Run watermark detection on audio files.
-- **`attack`**: Embed watermarks, apply attacks, then detect (robustness testing).
-- **`evaluate`**: Evaluate WER/CER using OpenAI Whisper on raw and watermarked datasets.
+| Command | Role |
+|---------|------|
+| `watermark` | Embed watermarks and record quality metrics (SNR, PESQ, BER, NC, plots). |
+| `detect` | Run watermark detection on audio files; log results to CSV. |
+| `attack` | Embed, apply attacks, detect; optionally save attacked audio and robustness plots. |
+| `evaluate` | Run Whisper on **raw** and **watermarked** dataset roots; write per-utterance CSVs and a comparison summary. |
 
-### Examples
+---
 
-Embed watermarks with default AudioSeal:
+## Command: `evaluate` (Whisper)
+
+**Required**
+
+| Option | Description |
+|--------|-------------|
+| `--raw-dataset DIR` | Directory containing the **raw** dataset (must include a `test.csv` or `test.tsv` split). |
+| `--watermarked-dataset DIR` | Same layout for **watermarked** audio and references. |
+
+**Optional**
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--output-root DIR` | `whisper_results` | Folder for all Whisper outputs (CSVs below). |
+| `--model-size SIZE` | `base` | Whisper size: `tiny`, `base`, `small`, `medium`, `large`. |
+| `--sample-rate SR` | `16000` | Resample loaded audio to this rate before transcription. |
+| `--language CODE` | `it` | ISO 639-1 language passed to Whisper (e.g. `it`, `en`). Use `auto` (or `none`) for automatic language detection. |
+
+**Example**
+
+```bash
+python main.py evaluate ^
+  --raw-dataset path/to/raw_dataset ^
+  --watermarked-dataset path/to/wm_dataset ^
+  --output-root whisper_results ^
+  --model-size base ^
+  --sample-rate 16000 ^
+  --language it
+```
+
+(On Unix, replace `^` with `\` or put arguments on one line.)
+
+**Outputs** (under `--output-root`)
+
+| File | Contents |
+|------|----------|
+| `raw_whisper_evaluation.csv` | One row per test utterance: `audio_file`, `reference`, `hypothesis`, `wer`, `cer`, **`rtf`**. |
+| `watermarked_whisper_evaluation.csv` | Same columns for the watermarked set. |
+| `whisper_comparison_summary.csv` | One row per dataset: `model_label`, `dataset_root`, `results_csv`, `num_examples`, `avg_wer`, `avg_cer`, **`avg_rtf`**. |
+
+**RTF (real-time factor)** is wall-clock Whisper transcribe time divided by audio duration: **RTF &lt; 1** means faster than real time, **&gt; 1** means slower. Per-utterance RTF is averaged into **`avg_rtf`** in the summary.
+
+---
+
+## Command: `watermark`
+
+**Required**
+
+| Option | Description |
+|--------|-------------|
+| `-i DIR`, `--input DIR` | Folder with `.wav` / `.flac` / `.mp3` (top level only; no subfolders). |
+
+**Algorithm**
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-a ALGORITHM`, `--algorithm` | `audioseal` | One of: `audioseal`, `silentcipher`, `wavmark`. |
+| `--all-algorithms` | off | Run every registered algorithm in one invocation. |
+
+**Paths and outputs**
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-o DIR`, `--output-plot` | `plots` (cwd) | Directory for waveform/spectrogram comparison PNGs. |
+| `--no-plots` | off | Skip plots. |
+| `--plot-dpi N` | `150` | PNG resolution. |
+| `--output-watermarked DIR` | `<input>/<algorithm>_watermarked_wav` | Where to write watermarked files. |
+| `--output-metrics FILE` | timestamped under `metrics/` | Basename for watermark metrics CSV (see `metrics_csv` helpers). |
+| `--output-format {wav,match-input}` | `wav` | Output always `.wav`, or match each source extension (`.wav`/`.flac`/`.mp3`; MP3 may need FFmpeg). |
+
+---
+
+## Command: `detect`
+
+**Required:** `-i` / `--input` as for `watermark`.
+
+**Algorithm:** `--algorithm`, `--all-algorithms` (same as above).
+
+**Detection thresholds**
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--detection-threshold P` | `0.5` | Frame-level P(watermark) threshold. |
+| `--message-threshold P` | `0.5` | Message bit threshold for detection. |
+| `--file-fraction-threshold FRAC` | `0.5` | Fraction of frames above `--detection-threshold` required to count as detected. |
+
+**Logging**
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--output-detect-log FILE` | timestamped under `metrics/` | Basename for detection log CSV. |
+
+---
+
+## Command: `attack`
+
+**Required:** `-i` / `--input` as above.
+
+**Algorithm:** `--algorithm`, `--all-algorithms`.
+
+**Detection:** same threshold options as `detect`.
+
+**Attack-specific**
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--attack-seed N` | `42` | RNG seed for stochastic attacks. |
+| `--save-attacked DIR` | (none) | Save attacked watermarked WAVs (per-file subfolders). |
+| `--output-attack-metrics FILE` | timestamped under `metrics/` | Attack metrics CSV. |
+| `-o DIR`, `--output-attack-plot` | `plots/attack_summary` (cwd) | Heatmap and bar chart PNGs. |
+| `--no-attack-plots` | off | Skip attack summary plots. |
+| `--attack-plot-dpi N` | `150` | Resolution of attack summary figures. |
+
+---
+
+## Quick examples
+
+Embed watermarks (default AudioSeal):
+
 ```bash
 python main.py watermark -i path/to/audio_folder
 ```
 
-Detect watermarks:
+Detect:
+
 ```bash
 python main.py detect -i path/to/audio_folder
 ```
 
-Test robustness against attacks:
+Robustness pipeline:
+
 ```bash
 python main.py attack -i path/to/audio_folder
 ```
 
-Train and evaluate DeepSpeech models:
+Whisper evaluation (raw vs watermarked datasets):
+
 ```bash
-python main.py evaluate --raw-dataset /path/to/raw/csv --watermarked-dataset /path/to/watermarked/csv
+python main.py evaluate --raw-dataset /path/to/raw --watermarked-dataset /path/to/watermarked
 ```
 
-### Command-line options
+Run all algorithms on watermark:
 
-#### Global options
-| Option | Description |
-|--------|-------------|
-| `-i`, `--input` | **Required for watermark/detect/attack.** Folder containing `.wav`/`.flac`/`.mp3`. |
-| `--algorithm` | Algorithm to use (default: `audioseal`). Choices: `audioseal`, `silentcipher`, `wavmark`. |
-| `--all-algorithms` | Run all supported algorithms. |
+```bash
+python main.py watermark -i path/to/audio_folder --all-algorithms
+```
 
-#### Watermark command
-| Option | Description |
-|--------|-------------|
-| `-o`, `--output-plot` | Directory for PNG plots (default: `<input>/plots`). |
-| `--no-plots` | Skip comparison plots. |
-| `--plot-dpi` | PNG resolution (default: `150`). |
-| `--output-watermarked` | Directory for watermarked WAV files (default: `<input>/<algorithm>_watermarked_wav`). |
-| `--output-metrics` | Base name for metrics CSV (default: `<algorithm>_watermark_metrics.csv`). |
-
-#### Detect command
-| Option | Description |
-|--------|-------------|
-| `--detection-threshold` | Frame-level P(watermark) threshold (default: `0.5`). |
-| `--message-threshold` | Message bit threshold (default: `0.5`). |
-| `--file-fraction-threshold` | Fraction of frames above threshold to count as detected (default: `0.5`). |
-| `--output-detect-log` | Base name for detection log CSV. |
-
-#### Attack command
-Includes all watermark and detect options, plus:
-| Option | Description |
-|--------|-------------|
-| `--attack-seed` | RNG seed for stochastic attacks (default: `42`). |
-| `--save-attacked` | Directory to save attacked watermarked WAVs. |
-| `--output-attack-metrics` | Base name for attack metrics CSV. |
-| `--output-attack-plot` | Directory for attack robustness plots. |
-| `--no-attack-plots` | Skip attack summary plots. |
-
-#### Evaluate command
-| Option | Description |
-|--------|-------------|
-| `--raw-dataset` | **Required.** Directory with raw dataset CSV/TSV files. |
-| `--watermarked-dataset` | **Required.** Directory with watermarked dataset CSV/TSV files. |
-| `--output-root` | Output directory for results (default: `whisper_results`). |
-| `--model-size` | Whisper model size: tiny/base/small/medium/large (default: `base`). |
-| `--sample-rate` | Sample rate for evaluation (default: `16000`). |
+---
 
 ## What the script does
 
 ### Watermark embedding
-1. Load audio (WAV directly; FLAC/MP3 converted to temporary WAV).
-2. Embed watermark and compute `watermarked = original + watermark`.
-3. Print SNR (dB) — original power vs residual power.
-4. Save watermarked WAV.
-5. Compute BER/NC metrics.
-6. Optionally save comparison plots (waveforms and spectrograms).
+
+1. Load audio (WAV directly; FLAC/MP3 via loaders as implemented).
+2. Embed watermark.
+3. Print SNR (dB) and PESQ.
+4. Save watermarked audio.
+5. BER/NC where supported.
+6. Optional comparison plots.
 
 ### Detection
-- Run detector on audio files.
-- Log detection results to CSV.
+
+Runs the chosen backend’s detector and appends rows to the detection log CSV.
 
 ### Attacks
-- Embed watermarks.
-- Apply various audio attacks (resampling, compression, noise, etc.).
-- Detect watermarks on attacked audio.
-- Generate robustness heatmaps and bar charts.
+
+Embeds watermarks, applies the configured attack suite, runs detection, and optionally exports robustness plots.
 
 ### Whisper evaluation
-- Evaluate WER/CER on the test sets of raw and watermarked datasets using pre-trained Whisper models.
-- Output comparison summary.
+
+Runs Whisper on each test split, computes **WER**, **CER**, and **RTF** per file, writes detailed CSVs for raw and watermarked data, and a side-by-side **summary** including average RTF.
+
+---
 
 ## Behaviour notes
 
 ### Audio loading
-- **WAV**, **FLAC**, and **MP3** supported via PySoundFile and librosa.
-- Non-WAV formats converted to temporary WAV before processing.
+
+- **WAV**, **FLAC**, and **MP3** are supported (implementation uses PySoundFile, librosa for MP3 where needed).
+- Non-WAV formats may be converted internally for processing.
 
 ### Tensor shapes
-- Algorithms expect `(batch, channels, samples)`.
-- Mono audio converted to stereo if needed.
+
+- Algorithms expect `(batch, channels, samples)`; mono/stereo handling is backend-specific.
 
 ### PyTorch compilation
-- `TORCHDYNAMO_DISABLE=1` set to avoid MSVC requirements on Windows.
+
+- `TORCHDYNAMO_DISABLE=1` is set to avoid MSVC requirements on Windows (see `main.py`).
 
 ### Sample rates
-- Algorithms work best at 16 kHz; resample if needed.
+
+- Watermark paths often assume ~16 kHz where documented in code; Whisper evaluation resamples to `--sample-rate`.
+
+---
 
 ## References
 

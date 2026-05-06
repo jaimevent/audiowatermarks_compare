@@ -1,6 +1,6 @@
 """Whisper evaluation helpers for audio watermarking impact assessment.
 
-This module uses OpenAI Whisper for evaluating WER/CER on raw and watermarked
+This module uses OpenAI Whisper for evaluating WER/CER and RTF on raw and watermarked
 audio datasets. It expects dataset roots to contain CSV/TSV split files named
 `test.csv|.tsv` with columns for audio paths and transcripts.
 """
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import csv
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -28,6 +29,7 @@ class EvaluationMetrics:
     num_examples: int
     avg_wer: float
     avg_cer: float
+    avg_rtf: float
     results_csv: str
 
 
@@ -180,7 +182,10 @@ def evaluate_with_whisper(
     *,
     language: str | None = "it",
 ) -> EvaluationMetrics:
-    """Evaluate WER/CER using Whisper on the test set.
+    """Evaluate WER/CER and RTF using Whisper on the test set.
+
+    Real-Time Factor (RTF) is wall-clock transcribe time divided by audio duration
+    (below 1.0 means faster than real time).
 
     ``language`` is an ISO 639-1 code (e.g. ``it``, ``en``). Use ``None`` or the string
     ``auto`` for automatic language detection.
@@ -190,40 +195,72 @@ def evaluate_with_whisper(
     whisper_lang = _whisper_language_for_transcribe(language)
 
     os.makedirs(os.path.dirname(os.path.abspath(results_csv)), exist_ok=True)
-    rows = []
     total_wer = 0.0
     total_cer = 0.0
+    total_rtf = 0.0
     count = 0
+    rtf_count = 0
 
     with open(results_csv, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["audio_file", "reference", "hypothesis", "wer", "cer"])
+        writer.writerow(
+            ["audio_file", "reference", "hypothesis", "wer", "cer", "rtf"]
+        )
         for wav_path, transcript in _iter_dataset_examples(test_csv):
             absolute_wav = _resolve_audio_path(dataset_root, wav_path)
             if not os.path.isfile(absolute_wav):
                 raise FileNotFoundError(f"Audio file not found: {absolute_wav}")
             audio = _load_audio_for_whisper(absolute_wav, sample_rate)
+            duration_sec = len(audio) / float(sample_rate)
+            t0 = time.perf_counter()
             result = model.transcribe(
                 audio,
                 language=whisper_lang,
                 fp16=torch.cuda.is_available(),
             )
+            elapsed_sec = time.perf_counter() - t0
+            if duration_sec > 0:
+                rtf = elapsed_sec / duration_sec
+                total_rtf += rtf
+                rtf_count += 1
+            else:
+                rtf = float("nan")
             hypothesis = result["text"]
             wer = compute_wer(transcript, hypothesis)
             cer = compute_cer(transcript, hypothesis)
             total_wer += wer
             total_cer += cer
             count += 1
-            writer.writerow([absolute_wav, transcript, hypothesis, f"{wer:.6f}", f"{cer:.6f}"])
+
+            print(f"Completed transcribing {wav_path} in {elapsed_sec:.2f} seconds")
+            print(f"RTF: {rtf:.2f}")
+            print(f"WER: {wer:.6f}")
+            print(f"CER: {cer:.6f}")
+            print(f"Transcript: {hypothesis}")
+            print(f"Reference: {transcript}")
+            print("-" * 100)
+
+            writer.writerow(
+                [
+                    absolute_wav,
+                    transcript,
+                    hypothesis,
+                    f"{wer:.6f}",
+                    f"{cer:.6f}",
+                    f"{rtf:.6f}" if not np.isnan(rtf) else "nan",
+                ]
+            )
 
     avg_wer = total_wer / count if count else float("nan")
     avg_cer = total_cer / count if count else float("nan")
+    avg_rtf = total_rtf / rtf_count if rtf_count else float("nan")
     return EvaluationMetrics(
         model_name=f"whisper-{model_size}",
         dataset_root=dataset_root,
         num_examples=count,
         avg_wer=avg_wer,
         avg_cer=avg_cer,
+        avg_rtf=avg_rtf,
         results_csv=os.path.abspath(results_csv),
     )
 
@@ -237,7 +274,7 @@ def evaluate_datasets(
     *,
     language: str | None = "it",
 ) -> list[EvaluationMetrics]:
-    """Evaluate WER/CER on raw and watermarked datasets using Whisper."""
+    """Evaluate WER/CER/RTF on raw and watermarked datasets using Whisper."""
     output_root = os.path.abspath(output_root)
     os.makedirs(output_root, exist_ok=True)
     results: list[EvaluationMetrics] = []
@@ -247,6 +284,7 @@ def evaluate_datasets(
         ("watermarked", watermarked_dataset_root),
     ):
         eval_csv = os.path.join(output_root, f"{label}_whisper_evaluation.csv")
+        print(f"Evaluating {label} dataset...")
         metrics = evaluate_with_whisper(
             dataset_root=dataset_root,
             results_csv=eval_csv,
@@ -266,6 +304,7 @@ def evaluate_datasets(
             "num_examples",
             "avg_wer",
             "avg_cer",
+            "avg_rtf",
         ])
         for metrics in results:
             writer.writerow(
@@ -276,6 +315,7 @@ def evaluate_datasets(
                     metrics.num_examples,
                     f"{metrics.avg_wer:.6f}",
                     f"{metrics.avg_cer:.6f}",
+                    f"{metrics.avg_rtf:.6f}",
                 ]
             )
 
