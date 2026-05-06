@@ -528,7 +528,16 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
 
-    return parser.parse_args()
+    args, unknown = parser.parse_known_args()
+    if unknown:
+        print(
+            f"Unrecognized argument(s): {' '.join(unknown)}\n"
+            f"Try: {parser.prog} --help",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    return args
+
 
 def main() -> None:
     _configure_hf_token_from_repo_file()
@@ -568,6 +577,7 @@ def main() -> None:
             print(
                 f"- {metrics.model_name}: dataset={metrics.dataset_root}, "
                 f"examples={metrics.num_examples}, wer={metrics.avg_wer:.4f}, cer={metrics.avg_cer:.4f}, "
+                f"rtf={metrics.avg_rtf:.4f}, "
                 f"eval_csv={metrics.results_csv}"
             )
         return
