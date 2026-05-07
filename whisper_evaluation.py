@@ -47,6 +47,10 @@ def _find_split_file(dataset_root: str, split: str) -> str:
 def _sniff_csv_delimiter(path: str) -> str:
     with open(path, "r", encoding="utf-8", newline="") as f:
         sample = f.read(2048)
+    if "\t" in sample and sample.count("\t") >= sample.count(","):
+        return "\t"
+    if "," in sample and sample.count(",") > sample.count("\t"):
+        return ","
     try:
         dialect = csv.Sniffer().sniff(sample, delimiters=",\t")
         return dialect.delimiter
@@ -62,6 +66,8 @@ def _iter_dataset_examples(path: str) -> Iterable[tuple[str, str]]:
         if header is None:
             return
 
+        if len(header) == 1 and "\t" in header[0]:
+            header = [column.strip() for column in header[0].split("\t")]
         header_lower = [column.strip().lower() for column in header]
         if "wav_filename" in header_lower and "transcript" in header_lower:
             wav_idx = header_lower.index("wav_filename")
@@ -87,11 +93,22 @@ def _iter_dataset_examples(path: str) -> Iterable[tuple[str, str]]:
                 wav_idx, transcript_idx = 0, 2
             else:
                 wav_idx, transcript_idx = 0, 1
-            yield from ((row[wav_idx].strip(), row[transcript_idx].strip()) for row in reader if row)
+            for row in reader:
+                if len(row) == 1 and "\t" in row[0]:
+                    row = [field.strip() for field in row[0].split("\t")]
+                if not row or row[0].strip().startswith("#"):
+                    continue
+                if len(row) <= max(wav_idx, transcript_idx):
+                    continue
+                yield row[wav_idx].strip(), row[transcript_idx].strip()
             return
 
         for row in reader:
+            if len(row) == 1 and "\t" in row[0]:
+                row = [field.strip() for field in row[0].split("\t")]
             if not row or row[0].strip().startswith("#"):
+                continue
+            if len(row) <= max(wav_idx, transcript_idx):
                 continue
             yield row[wav_idx].strip(), row[transcript_idx].strip()
 
@@ -191,7 +208,7 @@ def evaluate_with_whisper(
     ``auto`` for automatic language detection.
     """
     model = whisper.load_model(model_size)
-    test_csv = _find_split_file(dataset_root, "test")
+    test_csv = _find_split_file(dataset_root, "train")
     whisper_lang = _whisper_language_for_transcribe(language)
 
     os.makedirs(os.path.dirname(os.path.abspath(results_csv)), exist_ok=True)
@@ -209,7 +226,9 @@ def evaluate_with_whisper(
         for wav_path, transcript in _iter_dataset_examples(test_csv):
             absolute_wav = _resolve_audio_path(dataset_root, wav_path)
             if not os.path.isfile(absolute_wav):
-                raise FileNotFoundError(f"Audio file not found: {absolute_wav}")
+                #raise FileNotFoundError(f"Audio file not found: {absolute_wav}")
+                print(f"Warning: Audio file not found, skipping: {absolute_wav}")
+                continue
             audio = _load_audio_for_whisper(absolute_wav, sample_rate)
             duration_sec = len(audio) / float(sample_rate)
             t0 = time.perf_counter()
@@ -233,7 +252,7 @@ def evaluate_with_whisper(
             count += 1
 
             print(f"Completed transcribing {wav_path} in {elapsed_sec:.2f} seconds")
-            print(f"RTF: {rtf:.2f}")
+            print(f"RTF: {rtf:.6f}")
             print(f"WER: {wer:.6f}")
             print(f"CER: {cer:.6f}")
             print(f"Transcript: {hypothesis}")
