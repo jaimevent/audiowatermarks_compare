@@ -162,9 +162,18 @@ class WavmarkBackend(WatermarkBackend):
     ) -> tuple[torch.Tensor, torch.Tensor, int]:
         assert self._payload is not None
         wav_16k = wavmark_mono_16k_tensor(wav_batched, sample_rate)
+        min_length = 16000 + int(16000 * 0.1)
+        original_length = len(wav_16k)
+        if original_length < min_length:
+            pad_len = min_length - original_length
+            wav_16k_padded = np.concatenate([wav_16k, np.zeros(pad_len, dtype=np.float32)])
+        else:
+            wav_16k_padded = wav_16k
+
         watermarked_np, _ = wm.encode_watermark(
-            self._wmmodel, wav_16k, self._payload, show_progress=False
+            self._wmmodel, wav_16k_padded, self._payload, show_progress=False
         )
+        watermarked_np = watermarked_np[:original_length]
         watermarked_audio = numpy_1d_to_batch_tensor(watermarked_np)
         metrics_ref = numpy_1d_to_batch_tensor(wav_16k)
         if torch.cuda.is_available():
@@ -247,9 +256,18 @@ class WavmarkBackend(WatermarkBackend):
     ) -> tuple[torch.Tensor, int]:
         assert self._payload is not None
         wm_mono = wavmark_mono_16k_tensor(wav_batched, sample_rate)
+        min_length = 16000 + int(16000 * 0.1)
+        original_length = len(wm_mono)
+        if original_length < min_length:
+            pad_len = min_length - original_length
+            wm_mono_padded = np.concatenate([wm_mono, np.zeros(pad_len, dtype=np.float32)])
+        else:
+            wm_mono_padded = wm_mono
+
         watermarked_np, _ = wm.encode_watermark(
-            self._wmmodel, wm_mono, self._payload, show_progress=False
+            self._wmmodel, wm_mono_padded, self._payload, show_progress=False
         )
+        watermarked_np = watermarked_np[:original_length]
         wav_wm = numpy_1d_to_batch_tensor(watermarked_np)
         if torch.cuda.is_available():
             wav_wm = wav_wm.cuda()

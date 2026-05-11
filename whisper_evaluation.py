@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import os
 import time
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -58,7 +59,45 @@ def _sniff_csv_delimiter(path: str) -> str:
         return ","
 
 
-def _iter_dataset_examples(path: str) -> Iterable[tuple[str, str]]:
+def _get_dataset_filenames(path: str) -> set[str]:
+    """Build a set of basenames from the dataset's CSV for fast filtering."""
+    filenames = set()
+    delimiter = _sniff_csv_delimiter(path)
+    with open(path, "r", encoding="utf-8", newline="") as f:
+        reader = csv.reader(f, delimiter=delimiter)
+        header = next(reader, None)
+        if header is None:
+            return filenames
+
+        if len(header) == 1 and "\t" in header[0]:
+            header = [column.strip() for column in header[0].split("\t")]
+        header_lower = [column.strip().lower() for column in header]
+        if "wav_filename" in header_lower and "transcript" in header_lower:
+            wav_idx = header_lower.index("wav_filename")
+        elif "path" in header_lower:
+            wav_idx = header_lower.index("path")
+        else:
+            f.seek(0)
+            reader = csv.reader(f, delimiter=delimiter)
+            first_row = next(reader, None)
+            if first_row is None:
+                return filenames
+            wav_idx = 0
+
+        for row in reader:
+            if len(row) == 1 and "\t" in row[0]:
+                row = [field.strip() for field in row[0].split("\t")]
+            if not row or row[0].strip().startswith("#"):
+                continue
+            if len(row) <= wav_idx:
+                continue
+            audio_path = row[wav_idx].strip()
+            filenames.add(os.path.basename(audio_path))
+    return filenames
+
+
+def _iter_dataset_examples(path: str, whitelist_filenames: set[str] | None = None) -> Iterable[tuple[str, str]]:
+    """Iterate dataset examples, optionally filtering by basename whitelist."""
     delimiter = _sniff_csv_delimiter(path)
     with open(path, "r", encoding="utf-8", newline="") as f:
         reader = csv.reader(f, delimiter=delimiter)
@@ -100,7 +139,10 @@ def _iter_dataset_examples(path: str) -> Iterable[tuple[str, str]]:
                     continue
                 if len(row) <= max(wav_idx, transcript_idx):
                     continue
-                yield row[wav_idx].strip(), row[transcript_idx].strip()
+                audio_path = row[wav_idx].strip()
+                if whitelist_filenames and os.path.basename(audio_path) not in whitelist_filenames:
+                    continue
+                yield audio_path, row[transcript_idx].strip()
             return
 
         for row in reader:
@@ -110,7 +152,10 @@ def _iter_dataset_examples(path: str) -> Iterable[tuple[str, str]]:
                 continue
             if len(row) <= max(wav_idx, transcript_idx):
                 continue
-            yield row[wav_idx].strip(), row[transcript_idx].strip()
+            audio_path = row[wav_idx].strip()
+            if whitelist_filenames and os.path.basename(audio_path) not in whitelist_filenames:
+                continue
+            yield audio_path, row[transcript_idx].strip()
 
 
 def _resolve_audio_path(dataset_root: str, audio_path: str) -> str:
@@ -198,6 +243,7 @@ def evaluate_with_whisper(
     sample_rate: int = 16000,
     *,
     language: str | None = "it",
+    whitelist_filenames: set[str] | None = None,
 ) -> EvaluationMetrics:
     """Evaluate WER/CER and RTF using Whisper on the test set.
 
@@ -206,6 +252,8 @@ def evaluate_with_whisper(
 
     ``language`` is an ISO 639-1 code (e.g. ``it``, ``en``). Use ``None`` or the string
     ``auto`` for automatic language detection.
+
+    If ``whitelist_filenames`` is provided, only files with matching basenames are evaluated.
     """
     model = whisper.load_model(model_size)
     test_csv = _find_split_file(dataset_root, "train")
@@ -223,7 +271,7 @@ def evaluate_with_whisper(
         writer.writerow(
             ["audio_file", "reference", "hypothesis", "wer", "cer", "rtf"]
         )
-        for wav_path, transcript in _iter_dataset_examples(test_csv):
+        for wav_path, transcript in _iter_dataset_examples(test_csv, whitelist_filenames):
             absolute_wav = _resolve_audio_path(dataset_root, wav_path)
             if not os.path.isfile(absolute_wav):
                 #raise FileNotFoundError(f"Audio file not found: {absolute_wav}")
@@ -293,27 +341,49 @@ def evaluate_datasets(
     *,
     language: str | None = "it",
 ) -> list[EvaluationMetrics]:
-    """Evaluate WER/CER/RTF on raw and watermarked datasets using Whisper."""
+    """Evaluate WER/CER/RTF on raw and watermarked datasets using Whisper.
+    
+    Watermarked directory is used as reference: raw files are only evaluated if
+    they have a matching basename in the watermarked directory.
+    """
     output_root = os.path.abspath(output_root)
     os.makedirs(output_root, exist_ok=True)
     results: list[EvaluationMetrics] = []
 
-    for label, dataset_root in (
-        ("raw", raw_dataset_root),
-        ("watermarked", watermarked_dataset_root),
-    ):
-        eval_csv = os.path.join(output_root, f"{label}_whisper_evaluation.csv")
-        print(f"Evaluating {label} dataset...")
-        metrics = evaluate_with_whisper(
-            dataset_root=dataset_root,
-            results_csv=eval_csv,
-            model_size=model_size,
-            sample_rate=sample_rate,
-            language=language,
-        )
-        results.append(metrics)
+    # Evaluate watermarked dataset first to establish the reference set
+    watermarked_csv = _find_split_file(watermarked_dataset_root, "train")
+    watermarked_filenames = _get_dataset_filenames(watermarked_csv)
+    print(f"Found {len(watermarked_filenames)} audio files in watermarked dataset")
 
-    summary_csv = os.path.join(output_root, "whisper_comparison_summary.csv")
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    watermarked_csv_out = os.path.join(output_root, f"{stamp}_watermarked_whisper_evaluation.csv")
+    print("Evaluating watermarked dataset...")
+    metrics = evaluate_with_whisper(
+        dataset_root=watermarked_dataset_root,
+        results_csv=watermarked_csv_out,
+        model_size=model_size,
+        sample_rate=sample_rate,
+        language=language,
+    )
+    results.append(metrics)
+
+    # Evaluate raw dataset, using watermarked filenames as reference filter
+    raw_csv = _find_split_file(raw_dataset_root, "train")
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    raw_csv_out = os.path.join(output_root, f"{stamp}_raw_whisper_evaluation.csv")
+    print(f"Evaluating raw dataset (filtered to {len(watermarked_filenames)} matching files)...")
+    metrics = evaluate_with_whisper(
+        dataset_root=raw_dataset_root,
+        results_csv=raw_csv_out,
+        model_size=model_size,
+        sample_rate=sample_rate,
+        language=language,
+        whitelist_filenames=watermarked_filenames,
+    )
+    results.append(metrics)
+
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    summary_csv = os.path.join(output_root, f"{stamp}_whisper_comparison_summary.csv")
     with open(summary_csv, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow([

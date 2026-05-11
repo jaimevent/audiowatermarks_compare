@@ -236,7 +236,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Audio watermarking CLI (registered algorithms). "
-            "Subcommands: watermark, detect, attack."
+            "Subcommands: watermark, detect, attack, evaluate."
         )
     )
     parser.add_argument(
@@ -300,6 +300,13 @@ def _parse_args() -> argparse.Namespace:
             action="store_true",
             dest="run_all_algorithms",
             help="Run every algorithm registered in algorithms.ALGORITHM_REGISTRY.",
+        )
+        p.add_argument(
+            "--max-audios",
+            default=1000000,
+            type=int,
+            metavar="N",
+            help="Maximum number of audio files to process (default: 1000000).",
         )
 
     p_watermark = subparsers.add_parser(
@@ -660,8 +667,13 @@ def main() -> None:
         attack_resistance_rows: list[list[int]] = []
         attack_resistance_labels: list[str] = []
 
+        i = 0
+        maxAudios = args.max_audios if args.max_audios < len(audio_files) else len(audio_files)
+        print(f"Found {len(audio_files)} audio files in {audio_folder}. Processing up to {maxAudios} files for algorithm {algorithm}.")
         for audio_file in audio_files:
-            print(f"---- Processing audio file: {audio_file} for {algorithm} ----")
+            if i >= maxAudios:
+                break
+            print(f"---- Processing audio file: {audio_file} for {algorithm} / audio {i+1} of {maxAudios} ----")
             audio_path = os.path.join(audio_folder, audio_file)
             wav, sample_rate = load_audio(audio_path)
 
@@ -822,6 +834,7 @@ def main() -> None:
                 # Free GPU memory for attack command
                 del wav_wm
 
+            i += 1
             # Free common GPU memory
             del wav
             torch.cuda.empty_cache()

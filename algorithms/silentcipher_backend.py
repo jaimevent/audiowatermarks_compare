@@ -55,6 +55,9 @@ def message_bit_ber_nc(
     """BER (% of 40 bits) and NC between bit vectors."""
     if decoded is None or len(embedded) != 5 or len(decoded) != 5:
         return 100.0, 0.0
+    # Validate decoded message values are in valid uint8 range
+    if not all(0 <= x <= 255 for x in decoded):
+        return 100.0, 0.0
     e = np.unpackbits(np.asarray(embedded, dtype=np.uint8))
     d = np.unpackbits(np.asarray(decoded, dtype=np.uint8))
     if e.size != d.size:
@@ -155,12 +158,23 @@ class SilentCipherBackend(WatermarkBackend):
         args = self.args
         device = "cuda" if torch.cuda.is_available() else "cpu"
         model_type = getattr(args, "silentcipher_model", "44.1k")
+        if model_type not in ("44.1k", "16k"):
+            raise ValueError(
+                f"Unsupported SilentCipher model type: {model_type}. "
+                "Valid options are '44.1k' and '16k'."
+            )
+        if model_type == "16k":
+            raise RuntimeError(
+                "SilentCipher model_type '16k' is not currently supported by this backend. "
+                "Use --silentcipher-model 44.1k instead."
+            )
         self._model = silentcipher.get_model(model_type=model_type, device=device)
         self._message: list[int] | None = None
         # Attack suite stresses crops/time edits; library recommends phase_shift_decoding=True there.
-        self._phase_shift = True if False and command == "attack" and device == "cuda" else bool(
+        self._phase_shift = True if command == "attack" and device == "cuda" else bool(
             getattr(args, "silentcipher_phase_shift", False)
         )
+        self._phase_shift = False
         if command in ("watermark", "attack"):
             self._message = random_five_byte_message()
             print("SilentCipher message (5× uint8):", self._message)
