@@ -52,6 +52,7 @@ python main.py [GLOBAL_OPTIONS] COMMAND [COMMAND_OPTIONS]
 | `--generator NAME` | AudioSeal generator card name (default: `audioseal_wm_16bits`). |
 | `--detector NAME` | AudioSeal detector card name (default: `audioseal_detector_16bits`). |
 | `--debug` | Show debug information (default: enabled). |
+| `--max-audios` | Maximum number of audio files to process (default: 1.000.000). |
 | `--silentcipher-model {44.1k,16k}` | SilentCipher checkpoint family (default: `44.1k`). Ignored unless `--algorithm silentcipher`. |
 | `--silentcipher-phase-shift` | Use phase-shift decoding for SilentCipher on watermark/detect (`decode_wav(..., phase_shift_decoding=True)`); slower, more robust to crops. Ignored unless algorithm is SilentCipher. |
 
