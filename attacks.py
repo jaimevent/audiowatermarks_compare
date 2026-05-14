@@ -137,6 +137,13 @@ class AudioEffects:
         # Add batch and channel dimensions to the impulse response
         impulse_response = impulse_response.unsqueeze(0).unsqueeze(0)
 
+        # Pad the input on the left so the convolution returns an output with the original length.
+        orig_len = tensor.shape[-1]
+        kernel_size = impulse_response.shape[-1]
+        tensor = F.pad(tensor, (kernel_size - 1, 0))
+        if mask is not None:
+            mask = F.pad(mask, (kernel_size - 1, 0))
+
         # Convolve the audio signal with the impulse response
         reverbed_signal = julius.fft_conv1d(tensor, impulse_response)
 
@@ -144,13 +151,13 @@ class AudioEffects:
         reverbed_signal = (
             reverbed_signal
             / torch.max(torch.abs(reverbed_signal))
-            * torch.max(torch.abs(tensor))
+            * torch.max(torch.abs(tensor[..., kernel_size - 1 :]))
         )
 
-        # Ensure tensor size is not changed
-        tmp = torch.zeros_like(tensor)
-        tmp[..., : reverbed_signal.shape[-1]] = reverbed_signal
-        reverbed_signal = tmp
+        # Restore the original length
+        reverbed_signal = reverbed_signal[..., :orig_len]
+        if mask is not None:
+            mask = mask[..., :orig_len]
 
         return audio_effect_return(tensor=reverbed_signal, mask=mask)
 

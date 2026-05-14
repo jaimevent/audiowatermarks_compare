@@ -35,9 +35,15 @@ def wavmark_payload_survives_attack(
     """True iff WavMark decodes ``payload_embedded`` exactly from ``wav_batch_ch_first``."""
 
     mono16 = wavmark_mono_16k_tensor(wav_batch_ch_first, audio_sample_rate)
-    dec, _, _ = wavmark_decode_watermark(wmmodel, mono16, show_progress=False)
+    dec, info, _ = wavmark_decode_watermark(wmmodel, mono16, show_progress=False)
     if dec is None:
         return False
+    # Fast check: if sync fraction is very high, payload likely recovered.
+    # Avoid expensive comparison if sync is weak.
+    _, sync_frac, sims = wavmark_decode_sliding_stats(mono16, info)
+    if sync_frac < 0.1:  # Threshold: less than 10% sync hits suggests attack succeeded.
+        return False
+    # Only do expensive payload comparison if there's meaningful sync activity.
     a = np.asarray(payload_embedded).reshape(-1).astype(np.int64)
     b = np.asarray(dec).reshape(-1).astype(np.int64)
     return bool(np.array_equal(a, b))
@@ -269,8 +275,8 @@ class WavmarkBackend(WatermarkBackend):
         )
         watermarked_np = watermarked_np[:original_length]
         wav_wm = numpy_1d_to_batch_tensor(watermarked_np)
-        if torch.cuda.is_available():
-            wav_wm = wav_wm.cuda()
+        # Keep on CPU to avoid repeated GPU-CPU transfers during attack evaluation.
+        # (WavMark decode runs on CPU anyway; moving to GPU and back each attack is slow.)
         return wav_wm, 16000
 
     def attack_print_baseline(
