@@ -51,7 +51,8 @@ def save_watermarked_to_path(
         sf.write(out_abs, data_smp_ch, sample_rate, format="WAV", subtype="FLOAT")
         return
     if ext == ".flac":
-        sf.write(out_abs, data_smp_ch, sample_rate, format="FLAC", subtype="FLOAT")
+        # FLAC does not support a FLOAT subtype in libsndfile; use PCM_24 for lossless storage.
+        sf.write(out_abs, data_smp_ch, sample_rate, format="FLAC", subtype="PCM_24")
         return
     _write_mp3(watermarked_audio[0].detach().cpu().float(), sample_rate, out_abs)
 
