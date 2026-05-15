@@ -1,8 +1,9 @@
 """Whisper evaluation helpers for audio watermarking impact assessment.
 
 This module uses OpenAI Whisper for evaluating WER/CER and RTF on raw and watermarked
-audio datasets. It expects dataset roots to contain CSV/TSV split files named
-`test.csv|.tsv` with columns for audio paths and transcripts.
+audio datasets. It expects dataset roots to contain a matching split file path
+provided via `--test-file`, with columns for audio paths and transcripts. Accepted
+split-file extensions are `.csv`, `.tsv`, and `.txt`.
 """
 
 from __future__ import annotations
@@ -22,6 +23,8 @@ import soundfile as sf
 import torch
 import whisper
 
+SUPPORTED_AUDIO_EXTENSIONS = (".wav", ".flac", ".mp3")
+
 
 @dataclass
 class EvaluationMetrics:
@@ -34,14 +37,14 @@ class EvaluationMetrics:
     results_csv: str
 
 
-def _find_split_file(dataset_root: str, split: str) -> str:
-    for ext in (".csv", ".tsv"):
-        path = os.path.join(dataset_root, f"{split}{ext}")
-        if os.path.isfile(path):
-            return path
+def _resolve_test_file_path(dataset_root: str, test_file: str) -> str:
+    candidate = test_file
+    if not os.path.isabs(candidate):
+        candidate = os.path.join(dataset_root, candidate)
+    if os.path.isfile(candidate):
+        return candidate
     raise FileNotFoundError(
-        f"Could not find {split} split file under {dataset_root}. "
-        "Expected test.csv/tsv."
+        f"Could not find split file {test_file} under dataset root {dataset_root}."
     )
 
 
@@ -57,6 +60,20 @@ def _sniff_csv_delimiter(path: str) -> str:
         return dialect.delimiter
     except csv.Error:
         return ","
+
+
+def _normalize_split_row(row: list[str]) -> list[str]:
+    if len(row) == 1:
+        text = row[0].strip()
+        if not text:
+            return []
+        if "\t" in text:
+            return [field.strip() for field in text.split("\t")]
+        if " " in text:
+            first, rest = text.split(None, 1)
+            return [first.strip(), rest.strip()]
+        return [text]
+    return [field.strip() for field in row]
 
 
 def _get_dataset_filenames(path: str) -> set[str]:
@@ -85,13 +102,12 @@ def _get_dataset_filenames(path: str) -> set[str]:
             wav_idx = 0
 
         for row in reader:
-            if len(row) == 1 and "\t" in row[0]:
-                row = [field.strip() for field in row[0].split("\t")]
-            if not row or row[0].strip().startswith("#"):
+            row = _normalize_split_row(row)
+            if not row or row[0].startswith("#"):
                 continue
             if len(row) <= wav_idx:
                 continue
-            audio_path = row[wav_idx].strip()
+            audio_path = row[wav_idx]
             filenames.add(os.path.basename(audio_path))
     return filenames
 
@@ -133,35 +149,57 @@ def _iter_dataset_examples(path: str, whitelist_filenames: set[str] | None = Non
             else:
                 wav_idx, transcript_idx = 0, 1
             for row in reader:
-                if len(row) == 1 and "\t" in row[0]:
-                    row = [field.strip() for field in row[0].split("\t")]
-                if not row or row[0].strip().startswith("#"):
+                row = _normalize_split_row(row)
+                if not row or row[0].startswith("#"):
                     continue
                 if len(row) <= max(wav_idx, transcript_idx):
                     continue
-                audio_path = row[wav_idx].strip()
+                audio_path = row[wav_idx]
                 if whitelist_filenames and os.path.basename(audio_path) not in whitelist_filenames:
                     continue
-                yield audio_path, row[transcript_idx].strip()
+                yield audio_path, row[transcript_idx]
             return
 
         for row in reader:
-            if len(row) == 1 and "\t" in row[0]:
-                row = [field.strip() for field in row[0].split("\t")]
-            if not row or row[0].strip().startswith("#"):
+            row = _normalize_split_row(row)
+            if not row or row[0].startswith("#"):
                 continue
             if len(row) <= max(wav_idx, transcript_idx):
                 continue
-            audio_path = row[wav_idx].strip()
+            audio_path = row[wav_idx]
             if whitelist_filenames and os.path.basename(audio_path) not in whitelist_filenames:
                 continue
-            yield audio_path, row[transcript_idx].strip()
+            yield audio_path, row[transcript_idx]
+
+
+def _find_audio_file_by_basename(dataset_root: str, audio_path: str) -> str | None:
+    directory = os.path.dirname(audio_path)
+    basename = os.path.basename(audio_path)
+    if os.path.splitext(basename)[1]:
+        return None
+
+    search_root = os.path.join(dataset_root, directory) if directory else dataset_root
+    for ext in SUPPORTED_AUDIO_EXTENSIONS:
+        candidate = os.path.join(search_root, f"{basename}{ext}")
+        if os.path.isfile(candidate):
+            return os.path.abspath(candidate)
+    return None
 
 
 def _resolve_audio_path(dataset_root: str, audio_path: str) -> str:
     if os.path.isabs(audio_path):
-        return audio_path
-    return os.path.abspath(os.path.join(dataset_root, audio_path))
+        if os.path.isfile(audio_path):
+            return audio_path
+        fallback = _find_audio_file_by_basename(os.path.dirname(audio_path), audio_path)
+        return fallback if fallback is not None else audio_path
+
+    candidate = os.path.abspath(os.path.join(dataset_root, audio_path))
+    if os.path.isfile(candidate):
+        return candidate
+    if os.path.splitext(audio_path)[1]:
+        return candidate
+    fallback = _find_audio_file_by_basename(dataset_root, audio_path)
+    return fallback if fallback is not None else candidate
 
 
 def _whisper_language_for_transcribe(language: str | None) -> str | None:
@@ -243,6 +281,7 @@ def evaluate_with_whisper(
     sample_rate: int = 16000,
     *,
     language: str | None = "it",
+    test_csv_path: str | None = None,
     whitelist_filenames: set[str] | None = None,
 ) -> EvaluationMetrics:
     """Evaluate WER/CER and RTF using Whisper on the test set.
@@ -256,7 +295,9 @@ def evaluate_with_whisper(
     If ``whitelist_filenames`` is provided, only files with matching basenames are evaluated.
     """
     model = whisper.load_model(model_size)
-    test_csv = _find_split_file(dataset_root, "train")
+    if test_csv_path is None:
+        raise ValueError("test_csv_path must be provided for Whisper evaluation.")
+    test_csv = test_csv_path
     whisper_lang = _whisper_language_for_transcribe(language)
 
     os.makedirs(os.path.dirname(os.path.abspath(results_csv)), exist_ok=True)
@@ -275,7 +316,7 @@ def evaluate_with_whisper(
             absolute_wav = _resolve_audio_path(dataset_root, wav_path)
             if not os.path.isfile(absolute_wav):
                 #raise FileNotFoundError(f"Audio file not found: {absolute_wav}")
-                print(f"Warning: Audio file not found, skipping: {absolute_wav}")
+                #print(f"Warning: Audio file not found, skipping: {absolute_wav}")
                 continue
             audio = _load_audio_for_whisper(absolute_wav, sample_rate)
             duration_sec = len(audio) / float(sample_rate)
@@ -335,6 +376,7 @@ def evaluate_with_whisper(
 def evaluate_datasets(
     raw_dataset_root: str,
     watermarked_dataset_root: str,
+    test_file: str,
     output_root: str,
     model_size: str = "base",
     sample_rate: int = 16000,
@@ -351,7 +393,10 @@ def evaluate_datasets(
     results: list[EvaluationMetrics] = []
 
     # Evaluate watermarked dataset first to establish the reference set
-    watermarked_csv = _find_split_file(watermarked_dataset_root, "train")
+    watermarked_csv = _resolve_test_file_path(
+        watermarked_dataset_root,
+        test_file,
+    )
     watermarked_filenames = _get_dataset_filenames(watermarked_csv)
     print(f"Found {len(watermarked_filenames)} audio files in watermarked dataset")
 
@@ -364,11 +409,15 @@ def evaluate_datasets(
         model_size=model_size,
         sample_rate=sample_rate,
         language=language,
+        test_csv_path=watermarked_csv,
     )
     results.append(metrics)
 
     # Evaluate raw dataset, using watermarked filenames as reference filter
-    raw_csv = _find_split_file(raw_dataset_root, "train")
+    raw_csv = _resolve_test_file_path(
+        raw_dataset_root,
+        test_file,
+    )
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     raw_csv_out = os.path.join(output_root, f"{stamp}_raw_whisper_evaluation.csv")
     print(f"Evaluating raw dataset (filtered to {len(watermarked_filenames)} matching files)...")
@@ -378,6 +427,7 @@ def evaluate_datasets(
         model_size=model_size,
         sample_rate=sample_rate,
         language=language,
+        test_csv_path=raw_csv,
         whitelist_filenames=watermarked_filenames,
     )
     results.append(metrics)

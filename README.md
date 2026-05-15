@@ -75,6 +75,7 @@ python main.py [GLOBAL_OPTIONS] COMMAND [COMMAND_OPTIONS]
 |--------|-------------|
 | `--raw-dataset DIR` | Directory containing the **raw** dataset (must include a `test.csv` or `test.tsv` split). |
 | `--watermarked-dataset DIR` | Same layout for **watermarked** audio and references. |
+| `--test-file FILE` | | Split file path shared by both datasets. If relative, this path is resolved under each dataset root. Each row may contain a relative audio path or a basename without extension. Accepted extensions: `.csv`, `.tsv`, `.txt`. |
 
 **Optional**
 
@@ -205,7 +206,10 @@ python main.py attack -i path/to/audio_folder
 Whisper evaluation (raw vs watermarked datasets):
 
 ```bash
-python main.py evaluate --raw-dataset /path/to/raw --watermarked-dataset /path/to/watermarked
+python main.py evaluate \
+  --raw-dataset /path/to/raw \
+  --watermarked-dataset /path/to/watermarked \
+  --test-file test.csv
 ```
 
 Run all algorithms on watermark:
