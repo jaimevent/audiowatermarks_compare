@@ -480,13 +480,24 @@ def _parse_args() -> argparse.Namespace:
         "--raw-dataset",
         required=True,
         metavar="DIR",
-        help="Directory containing the raw dataset CSV/TSV files.",
+        help="Directory containing the raw dataset root for split files.",
     )
     p_train.add_argument(
         "--watermarked-dataset",
         required=True,
         metavar="DIR",
-        help="Directory containing the watermarked dataset CSV/TSV files.",
+        help="Directory containing the watermarked dataset root for split files.",
+    )
+    p_train.add_argument(
+        "--test-file",
+        required=True,
+        metavar="FILE",
+        help=(
+            "Path to the dataset split file relative to each dataset root, or an absolute path. "
+            "The same split path is used for both raw and watermarked datasets. "
+            "Each row may contain either a relative audio path or a basename without extension. "
+            "Accepted extensions: .csv, .tsv, .txt."
+        ),
     )
     p_train.add_argument(
         "--output-root",
@@ -549,6 +560,7 @@ def main() -> None:
         results = evaluate_datasets(
             raw_dataset_root=raw_dataset_root,
             watermarked_dataset_root=watermarked_dataset_root,
+            test_file=args.test_file,
             output_root=output_root,
             model_size=args.model_size,
             sample_rate=args.sample_rate,
