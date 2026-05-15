@@ -7,12 +7,14 @@ from typing import Type
 
 from .audioseal_backend import AudiosealBackend
 from .base import WatermarkBackend
+from .dsss_backend import DsssBackend
 from .wavmark_backend import WavmarkBackend
 from .silentcipher_backend import SilentCipherBackend
 
 # To add an algorithm: implement ``WatermarkBackend``, import it here, and register.
 ALGORITHM_REGISTRY: dict[str, Type[WatermarkBackend]] = {
     "audioseal": AudiosealBackend,
+    "dsss": DsssBackend,
     "wavmark": WavmarkBackend,
     "silentcipher": SilentCipherBackend,
 }
