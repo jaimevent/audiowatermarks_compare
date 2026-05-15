@@ -13,7 +13,6 @@ import os
 import time
 from datetime import datetime
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Iterable
 
 import julius
@@ -112,8 +111,24 @@ def _get_dataset_filenames(path: str) -> set[str]:
     return filenames
 
 
-def _iter_dataset_examples(path: str, whitelist_filenames: set[str] | None = None) -> Iterable[tuple[str, str]]:
-    """Iterate dataset examples, optionally filtering by basename whitelist."""
+def _dedupe_key_for_split_path(audio_path: str) -> str:
+    """Stable key so duplicate split rows (same utterance path) are evaluated once."""
+    return os.path.normcase(os.path.normpath(audio_path.strip()))
+
+
+def _iter_dataset_examples(
+    path: str,
+    whitelist_filenames: set[str] | None = None,
+    *,
+    dedupe_paths: bool = True,
+) -> Iterable[tuple[str, str]]:
+    """Iterate dataset examples, optionally filtering by basename whitelist.
+
+    When ``dedupe_paths`` is True (default), only the **first** row per unique
+    audio path (after normpath/normcase) is yielded. Large test manifests often
+    repeat the same file many times; Whisper should run once per file.
+    """
+    seen_keys: set[str] = set()
     delimiter = _sniff_csv_delimiter(path)
     with open(path, "r", encoding="utf-8", newline="") as f:
         reader = csv.reader(f, delimiter=delimiter)
@@ -138,7 +153,6 @@ def _iter_dataset_examples(path: str, whitelist_filenames: set[str] | None = Non
                     f"Dataset {path} has a 'path' column but no 'sentence' or 'transcript' column."
                 )
         else:
-            csv_file = Path(path)
             f.seek(0)
             reader = csv.reader(f, delimiter=delimiter)
             first_row = next(reader, None)
@@ -157,6 +171,10 @@ def _iter_dataset_examples(path: str, whitelist_filenames: set[str] | None = Non
                 audio_path = row[wav_idx]
                 if whitelist_filenames and os.path.basename(audio_path) not in whitelist_filenames:
                     continue
+                key = _dedupe_key_for_split_path(audio_path)
+                if dedupe_paths and key in seen_keys:
+                    continue
+                seen_keys.add(key)
                 yield audio_path, row[transcript_idx]
             return
 
@@ -169,6 +187,10 @@ def _iter_dataset_examples(path: str, whitelist_filenames: set[str] | None = Non
             audio_path = row[wav_idx]
             if whitelist_filenames and os.path.basename(audio_path) not in whitelist_filenames:
                 continue
+            key = _dedupe_key_for_split_path(audio_path)
+            if dedupe_paths and key in seen_keys:
+                continue
+            seen_keys.add(key)
             yield audio_path, row[transcript_idx]
 
 
@@ -384,9 +406,13 @@ def evaluate_datasets(
     language: str | None = "it",
 ) -> list[EvaluationMetrics]:
     """Evaluate WER/CER/RTF on raw and watermarked datasets using Whisper.
-    
+
+    Split files may list the same audio path many times (e.g. huge manifests with
+    duplicates); evaluation **deduplicates by normalized path** so each file is
+    transcribed once (first row's transcript is kept).
+
     Watermarked directory is used as reference: raw files are only evaluated if
-    they have a matching basename in the watermarked directory.
+    they have a matching basename in the watermarked split.
     """
     output_root = os.path.abspath(output_root)
     os.makedirs(output_root, exist_ok=True)
