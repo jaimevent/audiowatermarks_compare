@@ -116,6 +116,21 @@ def _dedupe_key_for_split_path(audio_path: str) -> str:
     return os.path.normcase(os.path.normpath(audio_path.strip()))
 
 
+def _filter_existing_files(dataset_root: str, filenames: set[str]) -> set[str]:
+    """Filter a set of basenames to only those that exist in the dataset root.
+
+    Searches for matching audio files with supported extensions (.wav, .flac, .mp3).
+    """
+    existing = set()
+    for basename in filenames:
+        for ext in SUPPORTED_AUDIO_EXTENSIONS:
+            candidate = os.path.join(dataset_root, f"{basename}{ext}")
+            if os.path.isfile(candidate):
+                existing.add(basename)
+                break
+    return existing
+
+
 def _iter_dataset_examples(
     path: str,
     whitelist_filenames: set[str] | None = None,
@@ -127,6 +142,15 @@ def _iter_dataset_examples(
     When ``dedupe_paths`` is True (default), only the **first** row per unique
     audio path (after normpath/normcase) is yielded. Large test manifests often
     repeat the same file many times; Whisper should run once per file.
+
+    Supports three file formats:
+    1. TXT (space-separated): basename + transcript on each line
+       Example: 103-1240-0000 CHAPTER ONE MISSUS RACHEL...
+    2. TSV (tab-separated with header): must have 'path' and 'sentence' columns
+       Example: client_id    path    sentence_id    sentence    ...
+    3. CSV (comma-separated with header):
+       - With 'wav_filename' + 'transcript' columns, OR
+       - With 'path' + ('sentence' or 'transcript') columns
     """
     seen_keys: set[str] = set()
     delimiter = _sniff_csv_delimiter(path)
@@ -142,6 +166,21 @@ def _iter_dataset_examples(
         if "wav_filename" in header_lower and "transcript" in header_lower:
             wav_idx = header_lower.index("wav_filename")
             transcript_idx = header_lower.index("transcript")
+            for row in reader:
+                row = _normalize_split_row(row)
+                if not row or row[0].startswith("#"):
+                    continue
+                if len(row) <= max(wav_idx, transcript_idx):
+                    continue
+                audio_path = row[wav_idx]
+                if whitelist_filenames and os.path.basename(audio_path) not in whitelist_filenames:
+                    continue
+                key = _dedupe_key_for_split_path(audio_path)
+                if dedupe_paths and key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                yield audio_path, row[transcript_idx]
+            return
         elif "path" in header_lower:
             wav_idx = header_lower.index("path")
             if "sentence" in header_lower:
@@ -152,7 +191,25 @@ def _iter_dataset_examples(
                 raise ValueError(
                     f"Dataset {path} has a 'path' column but no 'sentence' or 'transcript' column."
                 )
+            for row in reader:
+                row = _normalize_split_row(row)
+                if not row or row[0].startswith("#"):
+                    continue
+                if len(row) <= max(wav_idx, transcript_idx):
+                    continue
+                audio_path = row[wav_idx]
+                if whitelist_filenames and os.path.basename(audio_path) not in whitelist_filenames:
+                    continue
+                key = _dedupe_key_for_split_path(audio_path)
+                if dedupe_paths and key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                yield audio_path, row[transcript_idx]
+            return
         else:
+            # Headerless file: TXT format (space-separated basename + transcript).
+            # Example: "103-1240-0000 CHAPTER ONE MISSUS RACHEL LYNDE..."
+            # After _normalize_split_row, this becomes ['103-1240-0000', 'CHAPTER ONE...']
             f.seek(0)
             reader = csv.reader(f, delimiter=delimiter)
             first_row = next(reader, None)
@@ -177,21 +234,6 @@ def _iter_dataset_examples(
                 seen_keys.add(key)
                 yield audio_path, row[transcript_idx]
             return
-
-        for row in reader:
-            row = _normalize_split_row(row)
-            if not row or row[0].startswith("#"):
-                continue
-            if len(row) <= max(wav_idx, transcript_idx):
-                continue
-            audio_path = row[wav_idx]
-            if whitelist_filenames and os.path.basename(audio_path) not in whitelist_filenames:
-                continue
-            key = _dedupe_key_for_split_path(audio_path)
-            if dedupe_paths and key in seen_keys:
-                continue
-            seen_keys.add(key)
-            yield audio_path, row[transcript_idx]
 
 
 def _find_audio_file_by_basename(dataset_root: str, audio_path: str) -> str | None:
@@ -424,7 +466,9 @@ def evaluate_datasets(
         test_file,
     )
     watermarked_filenames = _get_dataset_filenames(watermarked_csv)
-    print(f"Found {len(watermarked_filenames)} audio files in watermarked dataset")
+    print(f"Found {len(watermarked_filenames)} entries in watermarked test file")
+    watermarked_filenames = _filter_existing_files(watermarked_dataset_root, watermarked_filenames)
+    print(f"Found {len(watermarked_filenames)} matching audio files in watermarked dataset folder")
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     watermarked_csv_out = os.path.join(output_root, f"{stamp}_watermarked_whisper_evaluation.csv")
