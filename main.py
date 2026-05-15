@@ -113,84 +113,6 @@ def pesq_score(
     mode = "wb" if sample_rate == 16000 else "nb"
     return float(pesq(sample_rate, ref, deg, mode))
 
-# For the moment not used due to the lack of a PEAQ backend in PATH
-def odg_score(
-    wav_original: torch.Tensor,
-    wav_watermarked: torch.Tensor,
-    sample_rate: int,
-) -> float:
-    """ODG score via an external PEAQ backend (gstpeaq/peaqb).
-
-    ODG is defined in ITU-R BS.1387 (PEAQ) and typically ranges in [-4, 0].
-    """
-    if wav_original.shape != wav_watermarked.shape:
-        raise ValueError(
-            f"Shape mismatch: original {tuple(wav_original.shape)} vs watermarked {tuple(wav_watermarked.shape)}"
-        )
-    if wav_original.dim() != 3:
-        raise ValueError(
-            f"Expected tensors of rank 3 (batch, channels, samples); got {wav_original.dim()}"
-        )
-
-    ref = waveform_to_mono_numpy(wav_original[0]).astype(np.float32, copy=False)
-    deg = waveform_to_mono_numpy(wav_watermarked[0]).astype(np.float32, copy=False)
-
-    # Most open PEAQ tools expect 48 kHz input.
-    if sample_rate != 48000:
-        ref = _resample_audio(ref, sample_rate, 48000)
-        deg = _resample_audio(deg, sample_rate, 48000)
-        sample_rate = 48000
-
-    backend = shutil.which("gstpeaq") or shutil.which("peaqb")
-    if backend is None:
-        raise RuntimeError(
-            "No PEAQ backend found. Install 'gstpeaq' or 'peaqb' and make it available in PATH."
-        )
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        ref_path = os.path.join(tmpdir, "ref.wav")
-        deg_path = os.path.join(tmpdir, "deg.wav")
-        # PCM_16 maximizes compatibility with command-line PEAQ tools.
-        sf.write(ref_path, ref, sample_rate, format="WAV", subtype="PCM_16")
-        sf.write(deg_path, deg, sample_rate, format="WAV", subtype="PCM_16")
-
-        candidate_cmds = []
-        exe_name = os.path.basename(backend).lower()
-        if "gstpeaq" in exe_name:
-            candidate_cmds = [
-                [backend, "--basic", ref_path, deg_path],
-                [backend, ref_path, deg_path],
-            ]
-        else:
-            candidate_cmds = [[backend, ref_path, deg_path]]
-
-        output = ""
-        for cmd in candidate_cmds:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            output = (proc.stdout or "") + "\n" + (proc.stderr or "")
-            if proc.returncode == 0:
-                break
-        else:
-            raise RuntimeError(
-                f"PEAQ backend execution failed. Last output:\n{output.strip()}"
-            )
-
-    match = re.search(
-        r"(?:ODG|Objective Difference Grade)\s*[:=]?\s*(-?\d+(?:\.\d+)?)",
-        output,
-        flags=re.IGNORECASE,
-    )
-    if not match:
-        raise RuntimeError(
-            f"Could not parse ODG from backend output:\n{output.strip()}"
-        )
-    return float(match.group(1))
-
 def _resample_audio(audio: np.ndarray, original_sr: int, target_sr: int) -> np.ndarray:
     """Resample a 1-D numpy audio signal to the target sample rate."""
     if original_sr == target_sr:
@@ -366,6 +288,34 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
 
+    p_watermark.add_argument(
+        "--dsss-message",
+        default="unimilano",
+        metavar="TEXT",
+        help="DSSS UTF-8 payload (default: unimilano). Ignored unless algorithm is dsss.",
+    )
+    p_watermark.add_argument(
+        "--dsss-frame-length",
+        type=int,
+        default=4096,
+        metavar="N",
+        help="DSSS samples per bit (default: 4096). Ignored unless algorithm is dsss.",
+    )
+    p_watermark.add_argument(
+        "--dsss-alpha",
+        type=float,
+        default=0.01,
+        metavar="A",
+        help="DSSS embedding strength (default: 0.01). Ignored unless algorithm is dsss.",
+    )
+    p_watermark.add_argument(
+        "--dsss-seed",
+        type=int,
+        default=42,
+        metavar="N",
+        help="DSSS PN sequence seed (default: 42). Ignored unless algorithm is dsss.",
+    )
+
     p_detect = subparsers.add_parser(
         "detect",
         help="Detect a watermark in audio files.",
@@ -407,6 +357,12 @@ def _parse_args() -> argparse.Namespace:
             "Base name for detection log CSV in the project `metrics/` folder "
             "(default: detection_log.csv; final name is prefixed with timestamp)."
         ),
+    )
+    p_detect.add_argument(
+        "--dsss-message",
+        default="unimilano",
+        metavar="TEXT",
+        help="DSSS UTF-8 payload (default: unimilano). Ignored unless algorithm is dsss.",
     )
     attach_algorithm_arguments(p_detect)
 
@@ -486,6 +442,33 @@ def _parse_args() -> argparse.Namespace:
         default=150,
         metavar="N",
         help="Resolution of attack summary PNGs (default: 150).",
+    )
+    p_attack.add_argument(
+        "--dsss-message",
+        default="unimilano",
+        metavar="TEXT",
+        help="DSSS UTF-8 payload (default: unimilano). Ignored unless algorithm is dsss.",
+    )
+    p_attack.add_argument(
+        "--dsss-frame-length",
+        type=int,
+        default=4096,
+        metavar="N",
+        help="DSSS samples per bit (default: 4096). Ignored unless algorithm is dsss.",
+    )
+    p_attack.add_argument(
+        "--dsss-alpha",
+        type=float,
+        default=0.01,
+        metavar="A",
+        help="DSSS embedding strength (default: 0.01). Ignored unless algorithm is dsss.",
+    )
+    p_attack.add_argument(
+        "--dsss-seed",
+        type=int,
+        default=42,
+        metavar="N",
+        help="DSSS PN sequence seed (default: 42). Ignored unless algorithm is dsss.",
     )
     attach_algorithm_arguments(p_attack)
 
@@ -727,6 +710,8 @@ def main() -> None:
                 post = backend.compute_ber_nc_after_save(wav_out_path)
                 if post is not None:
                     ber_val, nc_val = post
+                elif pre is None:
+                    ber_val, nc_val = 0.0, 0.0
 
                 backend.print_ber_line(ber_val)
                 print(f"  NC: {nc_val:.3f}")
