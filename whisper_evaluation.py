@@ -116,21 +116,6 @@ def _dedupe_key_for_split_path(audio_path: str) -> str:
     return os.path.normcase(os.path.normpath(audio_path.strip()))
 
 
-def _filter_existing_files(dataset_root: str, filenames: set[str]) -> set[str]:
-    """Filter a set of basenames to only those that exist in the dataset root.
-
-    Searches for matching audio files with supported extensions (.wav, .flac, .mp3).
-    """
-    existing = set()
-    for basename in filenames:
-        for ext in SUPPORTED_AUDIO_EXTENSIONS:
-            candidate = os.path.join(dataset_root, f"{basename}{ext}")
-            if os.path.isfile(candidate):
-                existing.add(basename)
-                break
-    return existing
-
-
 def _iter_dataset_examples(
     path: str,
     whitelist_filenames: set[str] | None = None,
@@ -347,6 +332,7 @@ def evaluate_with_whisper(
     language: str | None = "it",
     test_csv_path: str | None = None,
     whitelist_filenames: set[str] | None = None,
+    max_audios: int | None = None,
 ) -> EvaluationMetrics:
     """Evaluate WER/CER and RTF using Whisper on the test set.
 
@@ -377,10 +363,11 @@ def evaluate_with_whisper(
             ["audio_file", "reference", "hypothesis", "wer", "cer", "rtf"]
         )
         for wav_path, transcript in _iter_dataset_examples(test_csv, whitelist_filenames):
+            if max_audios is not None and count >= max_audios:
+                print(f"Reached max_audios={max_audios}; stopping evaluation.")
+                break
             absolute_wav = _resolve_audio_path(dataset_root, wav_path)
             if not os.path.isfile(absolute_wav):
-                #raise FileNotFoundError(f"Audio file not found: {absolute_wav}")
-                #print(f"Warning: Audio file not found, skipping: {absolute_wav}")
                 continue
             audio = _load_audio_for_whisper(absolute_wav, sample_rate)
             duration_sec = len(audio) / float(sample_rate)
@@ -446,6 +433,7 @@ def evaluate_datasets(
     sample_rate: int = 16000,
     *,
     language: str | None = "it",
+    max_audios: int | None = None,
 ) -> list[EvaluationMetrics]:
     """Evaluate WER/CER/RTF on raw and watermarked datasets using Whisper.
 
@@ -467,8 +455,6 @@ def evaluate_datasets(
     )
     watermarked_filenames = _get_dataset_filenames(watermarked_csv)
     print(f"Found {len(watermarked_filenames)} entries in watermarked test file")
-    watermarked_filenames = _filter_existing_files(watermarked_dataset_root, watermarked_filenames)
-    print(f"Found {len(watermarked_filenames)} matching audio files in watermarked dataset folder")
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     watermarked_csv_out = os.path.join(output_root, f"{stamp}_watermarked_whisper_evaluation.csv")
@@ -480,27 +466,32 @@ def evaluate_datasets(
         sample_rate=sample_rate,
         language=language,
         test_csv_path=watermarked_csv,
+        max_audios=max_audios,
     )
     results.append(metrics)
 
-    # Evaluate raw dataset, using watermarked filenames as reference filter
-    raw_csv = _resolve_test_file_path(
-        raw_dataset_root,
-        test_file,
-    )
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    raw_csv_out = os.path.join(output_root, f"{stamp}_raw_whisper_evaluation.csv")
-    print(f"Evaluating raw dataset (filtered to {len(watermarked_filenames)} matching files)...")
-    metrics = evaluate_with_whisper(
-        dataset_root=raw_dataset_root,
-        results_csv=raw_csv_out,
-        model_size=model_size,
-        sample_rate=sample_rate,
-        language=language,
-        test_csv_path=raw_csv,
-        whitelist_filenames=watermarked_filenames,
-    )
-    results.append(metrics)
+    if False:
+        # Evaluate raw dataset, using watermarked filenames as reference filter
+        raw_csv = _resolve_test_file_path(
+            raw_dataset_root,
+            test_file,
+        )
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        raw_csv_out = os.path.join(output_root, f"{stamp}_raw_whisper_evaluation.csv")
+        print(
+            f"Evaluating raw dataset (filtered to {len(watermarked_filenames)} entries from the watermarked split)..."
+        )
+        metrics = evaluate_with_whisper(
+            dataset_root=raw_dataset_root,
+            results_csv=raw_csv_out,
+            model_size=model_size,
+            sample_rate=sample_rate,
+            language=language,
+            test_csv_path=raw_csv,
+            whitelist_filenames=watermarked_filenames,
+            max_audios=max_audios,
+        )
+        results.append(metrics)
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     summary_csv = os.path.join(output_root, f"{stamp}_whisper_comparison_summary.csv")

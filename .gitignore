@@ -27,3 +27,4 @@ whisper_results/
 dataset/
 .hf_token
 hf_token.txt
+loop.sh

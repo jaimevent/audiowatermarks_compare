@@ -528,6 +528,7 @@ def _parse_args() -> argparse.Namespace:
             "Use 'auto' for automatic detection (default: it)."
         ),
     )
+    attach_algorithm_arguments(p_train)
 
     args, unknown = parser.parse_known_args()
     if unknown:
@@ -565,6 +566,7 @@ def main() -> None:
             model_size=args.model_size,
             sample_rate=args.sample_rate,
             language=args.language,
+            max_audios=args.max_audios,
         )
 
         lang_note = (

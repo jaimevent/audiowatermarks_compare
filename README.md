@@ -180,6 +180,7 @@ python main.py attack -i path/to/audio -a dsss ^
 | `--model-size` | `base` | `tiny`, `base`, `small`, `medium`, `large` |
 | `--sample-rate` | `16000` | Resample before transcription |
 | `--language CODE` | `it` | ISO 639-1 (`en`, `it`, …) or `auto` |
+| `--max-audios N` | `1000000` | Maximum number of audio files to evaluate per dataset |
 
 **Outputs** (under `--output-root`):
 
