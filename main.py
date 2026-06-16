@@ -8,11 +8,7 @@ os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import argparse
-import re
-import shutil
-import subprocess
 import sys
-import tempfile
 import time
 import torch
 

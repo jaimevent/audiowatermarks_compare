@@ -26,3 +26,5 @@ openai-whisper
 # cannot resolve it together with torch 2.11 above. SesameAILabs' fork bumps deps to
 # torch>=2.4 and torchaudio>=2.4 (same codebase, installable beside AudioSeal/WavMark).
 silentcipher @ git+https://github.com/SesameAILabs/silentcipher.git
+
+jiwer

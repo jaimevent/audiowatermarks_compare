@@ -22,7 +22,36 @@ import soundfile as sf
 import torch
 import whisper
 
+from jiwer import wer, cer
+from jiwer.transforms import (
+    Compose,
+    ReduceToListOfListOfChars,
+    ReduceToListOfListOfWords,
+    RemoveMultipleSpaces,
+    RemoveWhiteSpace,
+    Strip,
+    ToLowerCase,
+)
+
 SUPPORTED_AUDIO_EXTENSIONS = (".wav", ".flac", ".mp3")
+
+WER_TRANSFORMS = Compose(
+    [
+        ToLowerCase(),
+        Strip(),
+        RemoveMultipleSpaces(),
+        ReduceToListOfListOfWords(),
+    ]
+)
+CER_TRANSFORMS = Compose(
+    [
+        ToLowerCase(),
+        Strip(),
+        RemoveMultipleSpaces(),
+        RemoveWhiteSpace(),
+        ReduceToListOfListOfChars(),
+    ]
+)
 
 
 @dataclass
@@ -38,12 +67,10 @@ class EvaluationMetrics:
 
 def _resolve_test_file_path(dataset_root: str, test_file: str) -> str:
     candidate = test_file
-    if not os.path.isabs(candidate):
-        candidate = os.path.join(dataset_root, candidate)
     if os.path.isfile(candidate):
         return candidate
     raise FileNotFoundError(
-        f"Could not find split file {test_file} under dataset root {dataset_root}."
+        f"Could not find split file {test_file}."
     )
 
 
@@ -95,9 +122,6 @@ def _get_dataset_filenames(path: str) -> set[str]:
         else:
             f.seek(0)
             reader = csv.reader(f, delimiter=delimiter)
-            first_row = next(reader, None)
-            if first_row is None:
-                return filenames
             wav_idx = 0
 
         for row in reader:
@@ -204,6 +228,16 @@ def _iter_dataset_examples(
                 wav_idx, transcript_idx = 0, 2
             else:
                 wav_idx, transcript_idx = 0, 1
+
+            row = _normalize_split_row(first_row)
+            if row and not row[0].startswith("#") and len(row) > max(wav_idx, transcript_idx):
+                audio_path = row[wav_idx]
+                if not whitelist_filenames or os.path.basename(audio_path) in whitelist_filenames:
+                    key = _dedupe_key_for_split_path(audio_path)
+                    if not (dedupe_paths and key in seen_keys):
+                        seen_keys.add(key)
+                        yield audio_path, row[transcript_idx]
+
             for row in reader:
                 row = _normalize_split_row(row)
                 if not row or row[0].startswith("#"):
@@ -385,16 +419,32 @@ def evaluate_with_whisper(
             else:
                 rtf = float("nan")
             hypothesis = result["text"]
-            wer = compute_wer(transcript, hypothesis)
-            cer = compute_cer(transcript, hypothesis)
-            total_wer += wer
-            total_cer += cer
+            
+            # Use explicit jiwer transforms so WER/CER match the module's normalization.
+            wer_score = wer(
+                transcript,
+                hypothesis,
+                reference_transform=WER_TRANSFORMS,
+                hypothesis_transform=WER_TRANSFORMS,
+            )
+            cer_score = cer(
+                transcript,
+                hypothesis,
+                reference_transform=CER_TRANSFORMS,
+                hypothesis_transform=CER_TRANSFORMS,
+            )
+            
+            # Older internal fallback behavior is preserved in compute_* helpers.
+            # wer_score = compute_wer(transcript, hypothesis)
+            # cer_score = compute_cer(transcript, hypothesis)
+            total_wer += wer_score
+            total_cer += cer_score
             count += 1
 
             print(f"Completed transcribing {wav_path} in {elapsed_sec:.2f} seconds")
             print(f"RTF: {rtf:.6f}")
-            print(f"WER: {wer:.6f}")
-            print(f"CER: {cer:.6f}")
+            print(f"WER: {wer_score:.6f}")
+            print(f"CER: {cer_score:.6f}")
             print(f"Transcript: {hypothesis}")
             print(f"Reference: {transcript}")
             print("-" * 100)
@@ -404,8 +454,8 @@ def evaluate_with_whisper(
                     absolute_wav,
                     transcript,
                     hypothesis,
-                    f"{wer:.6f}",
-                    f"{cer:.6f}",
+                    f"{wer_score:.6f}",
+                    f"{cer_score:.6f}",
                     f"{rtf:.6f}" if not np.isnan(rtf) else "nan",
                 ]
             )
